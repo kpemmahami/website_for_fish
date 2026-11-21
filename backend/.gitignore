@@ -1,0 +1,4 @@
+private_evidence/
+.env
+.env.*
+!.env.example

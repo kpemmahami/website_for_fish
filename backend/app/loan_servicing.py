@@ -1,0 +1,593 @@
+"""Phase 0009: manually verified loan servicing ledger. No money movement or automated notifications."""
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from calendar import monthrange
+import hashlib
+import json
+import uuid
+from typing import Literal
+from fastapi import HTTPException, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func
+from sqlalchemy.orm import Mapped, mapped_column
+from .main import Base, app, Db, CurrentUser, owned_farm, audit
+from .lending import LoanApplication, LoanDecision, member, ghs
+
+TAG = ['Loan disbursement and recovery (manual ledger)']
+def utcnow(): return datetime.now(timezone.utc)
+def cents(value): return int((Decimal(str(value))*100).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+def add_months(day, months):
+    month = day.month - 1 + months
+    year = day.year + month // 12
+    month = month % 12 + 1
+    return date(year, month, min(day.day, monthrange(year, month)[1]))
+
+class LoanAccount(Base):
+    __tablename__='loan_accounts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    application_id: Mapped[int] = mapped_column(ForeignKey('loan_applications.id'), unique=True, nullable=False)
+    institution_id: Mapped[int] = mapped_column(ForeignKey('finance_institutions.id'), index=True, nullable=False)
+    farm_id: Mapped[int] = mapped_column(ForeignKey('farms.id'), index=True, nullable=False)
+    approved_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+    annual_flat_rate_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    frequency: Mapped[str] = mapped_column(String(20), nullable=False)
+    first_due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    term_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    commitment_fee_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processing_fee_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    insurance_fee_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='awaiting_disbursement')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+class LoanDisbursement(Base):
+    __tablename__='loan_disbursements'
+    __table_args__=(UniqueConstraint('loan_id','reference',name='uq_loan_disbursement_reference'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    loan_id: Mapped[int] = mapped_column(ForeignKey('loan_accounts.id'), index=True, nullable=False)
+    amount_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+    reference: Mapped[str] = mapped_column(String(100), nullable=False)
+    disbursed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    recorded_by: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+class LoanInstallment(Base):
+    __tablename__='loan_installments'
+    __table_args__=(UniqueConstraint('loan_id','number',name='uq_loan_installment_number'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    loan_id: Mapped[int] = mapped_column(ForeignKey('loan_accounts.id'), index=True, nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    due_on: Mapped[date] = mapped_column(Date, nullable=False)
+    principal_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+    interest_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+    fees_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+class LoanRepayment(Base):
+    __tablename__='loan_repayments'
+    __table_args__=(UniqueConstraint('loan_id','reference',name='uq_loan_repayment_reference'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    loan_id: Mapped[int] = mapped_column(ForeignKey('loan_accounts.id'), index=True, nullable=False)
+    amount_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+    interest_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+    principal_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+    fees_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reference: Mapped[str] = mapped_column(String(100), nullable=False)
+    paid_on: Mapped[date] = mapped_column(Date, nullable=False)
+    recorded_by: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+class LoanEvidence(Base):
+    __tablename__='loan_evidence'
+    __table_args__=(UniqueConstraint('farm_id','sha256',name='uq_loan_evidence_farm_sha256'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    farm_id: Mapped[int] = mapped_column(ForeignKey('farms.id'), index=True, nullable=False)
+    loan_id: Mapped[int | None] = mapped_column(ForeignKey('loan_accounts.id'), index=True, nullable=True)
+    application_id: Mapped[int | None] = mapped_column(ForeignKey('loan_applications.id'), index=True, nullable=True)
+    record_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    record_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    storage_name: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    media_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    device_recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    server_received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    uploaded_by: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+class CustomInstallmentIn(BaseModel):
+    due_on: date
+    principal_ghs: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+    interest_ghs: Decimal = Field(ge=0, max_digits=14, decimal_places=2)
+    fees_ghs: Decimal = Field(default=Decimal('0'), ge=0, max_digits=14, decimal_places=2)
+
+    @model_validator(mode='after')
+    def require_amount(self):
+        if self.principal_ghs + self.interest_ghs <= 0:
+            raise ValueError('Each custom installment must have a positive amount')
+        return self
+
+class OpenLoanIn(BaseModel):
+    application_id: int = Field(gt=0)
+    annual_flat_interest_percent: Decimal = Field(ge=0, le=100, max_digits=5, decimal_places=2)
+    commitment_fee_ghs: Decimal = Field(default=Decimal('0'), ge=0, max_digits=14, decimal_places=2)
+    processing_fee_ghs: Decimal = Field(default=Decimal('0'), ge=0, max_digits=14, decimal_places=2)
+    repayment_frequency: Literal['monthly','quarterly','harvest','custom']
+    first_due_date: date
+    custom_schedule: list[CustomInstallmentIn] | None = Field(default=None, min_length=1, max_length=240)
+
+    @model_validator(mode='after')
+    def validate_custom_schedule(self):
+        if self.repayment_frequency == 'custom':
+            if not self.custom_schedule:
+                raise ValueError('Custom repayment schedules require at least one installment')
+            dates = [item.due_on for item in self.custom_schedule]
+            if dates[0] != self.first_due_date:
+                raise ValueError('First due date must match the first custom installment')
+            if dates != sorted(set(dates)):
+                raise ValueError('Custom installment dates must be unique and ascending')
+        elif self.custom_schedule is not None:
+            raise ValueError('Custom installments are only valid for a custom repayment schedule')
+        return self
+
+class TransactionIn(BaseModel):
+    amount_ghs: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    reference: str = Field(min_length=3,max_length=100)
+    transaction_date: date
+    evidence_id: int = Field(gt=0)
+
+def loan_for_lender(db, loan_id, user, roles=('owner','officer','reviewer')):
+    loan=db.get(LoanAccount,loan_id)
+    if loan is None: raise HTTPException(404,'Loan not found')
+    member(db,loan.institution_id,user.id,roles)
+    return loan
+
+def loan_for_view(db, loan_id, user):
+    loan=db.get(LoanAccount,loan_id)
+    if loan is None: raise HTTPException(404,'Loan not found')
+    try:
+        owned_farm(loan.farm_id,user,db)
+        return loan
+    except HTTPException:
+        member(db,loan.institution_id,user.id)
+        return loan
+
+def sums(db, loan):
+    disbursed=db.scalar(select(func.coalesce(func.sum(LoanDisbursement.amount_pesewas),0)).where(LoanDisbursement.loan_id==loan.id))
+    repaid_principal=db.scalar(select(func.coalesce(func.sum(LoanRepayment.principal_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
+    repaid_interest=db.scalar(select(func.coalesce(func.sum(LoanRepayment.interest_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
+    scheduled_interest=0 if loan.status=='awaiting_disbursement' else db.scalar(
+        select(func.coalesce(func.sum(LoanInstallment.interest_pesewas),0)).where(LoanInstallment.loan_id==loan.id))
+    return disbursed,repaid_principal,repaid_interest,scheduled_interest
+
+def scheduled_interest(principal, annual_flat_rate_bps, term_months):
+    return int((Decimal(principal)*Decimal(annual_flat_rate_bps)*Decimal(term_months)/Decimal(120000))
+               .quantize(Decimal('1'),rounding=ROUND_HALF_UP))
+
+
+def loan_fee_total(loan):
+    return loan.commitment_fee_pesewas + loan.processing_fee_pesewas + loan.insurance_fee_pesewas
+
+
+def loan_evidence_view(evidence):
+    return {
+        'id': evidence.id,
+        'record_type': evidence.record_type,
+        'media_type': evidence.media_type,
+        'duration_seconds': evidence.duration_seconds,
+        'sha256': evidence.sha256,
+        'size_bytes': evidence.size_bytes,
+        'captured_at': evidence.captured_at,
+        'device_recorded_at': evidence.device_recorded_at,
+        'server_received_at': evidence.server_received_at,
+    }
+
+
+async def store_loan_evidence(
+    farm_id: int,
+    record_type: str,
+    loan_id: int | None,
+    request: Request,
+    captured_at: datetime,
+    device_recorded_at: datetime,
+    duration_seconds: int,
+    user,
+    db,
+):
+    from .evidence import MAX_VIDEO_BYTES, evidence_directory
+
+    if duration_seconds != 15:
+        raise HTTPException(422, 'Loan video evidence must be 15 seconds')
+    if captured_at.tzinfo is None or device_recorded_at.tzinfo is None:
+        raise HTTPException(422, 'Capture and device timestamps must include a timezone')
+    received_at = utcnow()
+    captured_utc = captured_at.astimezone(timezone.utc)
+    if captured_utc > received_at + timedelta(minutes=5) or received_at - captured_utc > timedelta(hours=24):
+        raise HTTPException(422, 'Record a fresh video within 24 hours before submitting')
+
+    media_type = request.headers.get('content-type', '').split(';', 1)[0].strip().lower()
+    if media_type not in ('video/webm', 'video/mp4'):
+        raise HTTPException(415, 'Upload a WebM or MP4 video')
+    content_length = request.headers.get('content-length')
+    if content_length:
+        try:
+            if int(content_length) > MAX_VIDEO_BYTES:
+                raise HTTPException(413, 'Video exceeds the 30 MB size limit')
+        except ValueError as error:
+            raise HTTPException(400, 'Invalid content length') from error
+
+    root = evidence_directory()
+    root.mkdir(parents=True, exist_ok=True)
+    suffix = '.webm' if media_type == 'video/webm' else '.mp4'
+    storage_name = f'{uuid.uuid4().hex}{suffix}'
+    path = root / storage_name
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with path.open('xb') as video_file:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > MAX_VIDEO_BYTES:
+                    raise HTTPException(413, 'Video exceeds the 30 MB size limit')
+                digest.update(chunk)
+                video_file.write(chunk)
+        if total == 0:
+            raise HTTPException(400, 'Video recording is empty')
+        with path.open('rb') as video_file:
+            header = video_file.read(12)
+        valid_header = header.startswith(b'\x1a\x45\xdf\xa3') if media_type == 'video/webm' else header[4:8] == b'ftyp'
+        if not valid_header:
+            raise HTTPException(415, 'Video file content does not match its media type')
+        sha256 = digest.hexdigest()
+        if db.scalar(select(LoanEvidence.id).where(LoanEvidence.farm_id == farm_id, LoanEvidence.sha256 == sha256)) is not None:
+            raise HTTPException(409, 'Duplicate loan video evidence already exists for this farm')
+        evidence = LoanEvidence(
+            farm_id=farm_id,
+            loan_id=loan_id,
+            record_type=record_type,
+            storage_name=storage_name,
+            media_type=media_type,
+            size_bytes=total,
+            duration_seconds=15,
+            sha256=sha256,
+            captured_at=captured_utc,
+            device_recorded_at=device_recorded_at.astimezone(timezone.utc),
+            server_received_at=received_at,
+            uploaded_by=user.id,
+        )
+        db.add(evidence)
+        db.flush()
+        audit(db, user, 'upload', 'loan_evidence', evidence.id, json.dumps({
+            'farm_id': farm_id,
+            'loan_id': loan_id,
+            'record_type': record_type,
+            'sha256': sha256,
+        }))
+        db.commit()
+        db.refresh(evidence)
+        return loan_evidence_view(evidence)
+    except Exception:
+        if path.exists():
+            path.unlink()
+        raise
+
+
+def required_loan_evidence(db, evidence_id: int, farm_id: int, record_type: str, user_id: int, loan_id: int | None = None):
+    evidence = db.get(LoanEvidence, evidence_id)
+    received_at = evidence.server_received_at if evidence is not None else None
+    if received_at is not None and received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=timezone.utc)
+    if (
+        evidence is None
+        or evidence.farm_id != farm_id
+        or evidence.record_type != record_type
+        or evidence.uploaded_by != user_id
+        or evidence.application_id is not None
+        or evidence.record_id is not None
+        or evidence.loan_id != loan_id
+        or utcnow() - received_at > timedelta(hours=2)
+    ):
+        raise HTTPException(422, 'Upload a new 15-second in-app video for this loan submission')
+    return evidence
+
+
+def view(db,loan):
+    disbursed,paid_p,paid_i,scheduled_i=sums(db,loan)
+    fees = loan_fee_total(loan)
+    fees_paid = db.scalar(select(func.coalesce(func.sum(LoanRepayment.fees_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
+    expected_interest = scheduled_i or scheduled_interest(loan.approved_pesewas,loan.annual_flat_rate_bps,loan.term_months)
+    total_contract = loan.approved_pesewas + expected_interest + fees
+    current_balance = disbursed-paid_p+scheduled_i-paid_i+fees-fees_paid
+    return {'id':loan.id,'application_id':loan.application_id,'farm_id':loan.farm_id,'institution_id':loan.institution_id,
+        'status':loan.status,'currency':'GHS','approved_ghs':ghs(loan.approved_pesewas),
+        'disbursed_ghs':ghs(disbursed),'undisbursed_ghs':ghs(loan.approved_pesewas-disbursed),
+        'principal_repaid_ghs':ghs(paid_p),'interest_repaid_ghs':ghs(paid_i),
+        'outstanding_principal_ghs':ghs(disbursed-paid_p),
+        'scheduled_interest_ghs':ghs(scheduled_i), 'outstanding_scheduled_interest_ghs':ghs(scheduled_i-paid_i),
+        'expected_interest_ghs':ghs(expected_interest),
+        'commitment_fee_ghs':ghs(loan.commitment_fee_pesewas),
+        'processing_fee_ghs':ghs(loan.processing_fee_pesewas),
+        'insurance_fee_ghs':ghs(loan.insurance_fee_pesewas),
+        'total_fees_ghs':ghs(fees),
+        'fees_paid_ghs':ghs(fees_paid),
+        'outstanding_fees_ghs':ghs(fees-fees_paid),
+        'total_contract_repayment_ghs':ghs(total_contract),
+        'total_scheduled_balance_ghs':ghs(max(0,current_balance)) if loan.status != 'awaiting_disbursement' else 0,
+        'annual_flat_interest_percent':loan.annual_flat_rate_bps/100,
+        'repayment_frequency':loan.frequency,'first_due_date':loan.first_due_date,
+        'note':'Flat simple interest; insurance is 1% of approved principal. Commitment and processing fees are lender-entered fixed GHS amounts. No penalties, variable rates or bank settlement verification.'}
+
+def make_schedule(db,loan):
+    principal,_,_,_=sums(db,loan)
+    if loan.frequency == 'custom':
+        return
+    count={'monthly':loan.term_months,'quarterly':(loan.term_months+2)//3,'harvest':1}[loan.frequency]
+    # Flat simple interest on fully disbursed principal, not reducing-balance interest.
+    interest=scheduled_interest(principal,loan.annual_flat_rate_bps,loan.term_months)
+    fees=loan_fee_total(loan)
+    step={'monthly':1,'quarterly':3,'harvest':0}[loan.frequency]
+    for n in range(count):
+        p=principal//count+(principal%count if n==count-1 else 0)
+        i=interest//count+(interest%count if n==count-1 else 0)
+        f=fees//count+(fees%count if n==count-1 else 0)
+        due=add_months(loan.first_due_date,n*step) if step else loan.first_due_date
+        db.add(LoanInstallment(loan_id=loan.id,number=n+1,due_on=due,
+            principal_pesewas=p,interest_pesewas=i,fees_pesewas=f))
+
+
+@app.post('/farms/{farm_id}/loan-evidence',status_code=201,tags=TAG)
+async def upload_application_evidence(
+    farm_id:int,request:Request,user:CurrentUser,db:Db,
+    captured_at:datetime,device_recorded_at:datetime,duration_seconds:int,
+):
+    owned_farm(farm_id,user,db)
+    return await store_loan_evidence(
+        farm_id,'loan_application',None,request,captured_at,device_recorded_at,duration_seconds,user,db)
+
+
+@app.post('/finance/loans/{loan_id}/evidence',status_code=201,tags=TAG)
+async def upload_transaction_evidence(
+    loan_id:int,request:Request,user:CurrentUser,db:Db,
+    record_type:Literal['disbursement','repayment'],
+    captured_at:datetime,device_recorded_at:datetime,duration_seconds:int,
+):
+    loan=loan_for_lender(db,loan_id,user,('owner','officer'))
+    return await store_loan_evidence(
+        loan.farm_id,record_type,loan.id,request,captured_at,device_recorded_at,duration_seconds,user,db)
+
+
+@app.get('/finance/loan-evidence/{evidence_id}/video',tags=TAG)
+def download_loan_evidence(evidence_id:int,user:CurrentUser,db:Db):
+    evidence=db.get(LoanEvidence,evidence_id)
+    if evidence is None:
+        raise HTTPException(404,'Loan video evidence not found')
+    try:
+        owned_farm(evidence.farm_id,user,db)
+    except HTTPException:
+        if evidence.loan_id is not None:
+            loan_for_view(db,evidence.loan_id,user)
+        elif evidence.application_id is not None:
+            application=db.get(LoanApplication,evidence.application_id)
+            if application is None:
+                raise HTTPException(404,'Loan video evidence not found')
+            member(db,application.institution_id,user.id)
+        else:
+            raise HTTPException(404,'Loan video evidence not found')
+    from .evidence import evidence_directory
+    path=evidence_directory()/evidence.storage_name
+    if not path.is_file():
+        raise HTTPException(404,'Loan video evidence file is unavailable')
+    return FileResponse(path,media_type=evidence.media_type,filename=f'loan_evidence_{evidence.id}{path.suffix}')
+
+
+@app.post('/finance/institutions/{institution_id}/loans',status_code=201,tags=TAG)
+def open_loan(institution_id:int,data:OpenLoanIn,user:CurrentUser,db:Db):
+    member(db,institution_id,user.id,('owner','reviewer'))
+    application=db.get(LoanApplication,data.application_id)
+    if application is None or application.institution_id!=institution_id: raise HTTPException(404,'Approved application not found')
+    if application.status!='approved': raise HTTPException(409,'Application not approved')
+    if db.scalar(select(LoanAccount.id).where(LoanAccount.application_id==application.id)) is not None: raise HTTPException(409,'Loan account already exists')
+    decision=db.scalar(select(LoanDecision).where(LoanDecision.application_id==application.id,LoanDecision.decision=='approved').order_by(LoanDecision.id.desc()))
+    if decision is None or not decision.approved_pesewas: raise HTTPException(409,'Approved amount not found')
+    if data.first_due_date<=date.today(): raise HTTPException(422,'First due date must be in the future')
+    if data.custom_schedule and data.custom_schedule[-1].due_on > add_months(data.first_due_date,application.term_months-1):
+        raise HTTPException(422,'Custom installments must fit within the approved repayment term')
+    approved=decision.approved_pesewas
+    if data.custom_schedule:
+        custom_principal=sum(cents(item.principal_ghs) for item in data.custom_schedule)
+        custom_interest=sum(cents(item.interest_ghs) for item in data.custom_schedule)
+        commitment_fee=cents(data.commitment_fee_ghs)
+        processing_fee=cents(data.processing_fee_ghs)
+        insurance_fee=cents(Decimal(approved)/100*Decimal('0.01'))
+        expected_interest=scheduled_interest(approved,int((data.annual_flat_interest_percent*100).quantize(Decimal('1'))),application.term_months)
+        if custom_principal!=approved:
+            raise HTTPException(422,'Custom installment principal must equal the approved loan amount')
+        if custom_interest!=expected_interest:
+            raise HTTPException(422,'Custom installment interest must equal the scheduled flat interest')
+        if sum(cents(item.fees_ghs) for item in data.custom_schedule)!=commitment_fee+processing_fee+insurance_fee:
+            raise HTTPException(422,'Custom installment fees must equal the commitment, processing, and 1% insurance fees')
+    else:
+        commitment_fee=cents(data.commitment_fee_ghs)
+        processing_fee=cents(data.processing_fee_ghs)
+        insurance_fee=cents(Decimal(approved)/100*Decimal('0.01'))
+    loan=LoanAccount(application_id=application.id,institution_id=institution_id,farm_id=application.farm_id,
+        approved_pesewas=approved,annual_flat_rate_bps=int((data.annual_flat_interest_percent*100).quantize(Decimal('1'))),
+        frequency=data.repayment_frequency,first_due_date=data.first_due_date,term_months=application.term_months,
+        commitment_fee_pesewas=commitment_fee,processing_fee_pesewas=processing_fee,insurance_fee_pesewas=insurance_fee)
+    db.add(loan);db.flush()
+    if data.custom_schedule:
+        for number,item in enumerate(data.custom_schedule,1):
+            db.add(LoanInstallment(loan_id=loan.id,number=number,due_on=item.due_on,
+                principal_pesewas=cents(item.principal_ghs),interest_pesewas=cents(item.interest_ghs),
+                fees_pesewas=cents(item.fees_ghs)))
+    audit(db,user,'open','loan_account',loan.id);db.commit()
+    return view(db,loan)
+
+@app.post('/finance/loans/{loan_id}/disbursements',status_code=201,tags=TAG)
+def record_disbursement(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
+    loan=loan_for_lender(db,loan_id,user,('owner','officer'))
+    if loan.status!='awaiting_disbursement': raise HTTPException(409,'Loan not awaiting disbursement')
+    if db.scalar(select(LoanDisbursement.id).where(LoanDisbursement.loan_id==loan.id,LoanDisbursement.reference==data.reference)) is not None:
+        raise HTTPException(409,'Disbursement reference already recorded')
+    if data.transaction_date>date.today(): raise HTTPException(422,'Future disbursement cannot be recorded')
+    amount=cents(data.amount_ghs)
+    disbursed,_,_,_=sums(db,loan)
+    if amount>loan.approved_pesewas-disbursed: raise HTTPException(422,'Disbursement exceeds approved amount')
+    evidence=required_loan_evidence(db,data.evidence_id,loan.farm_id,'disbursement',user.id,loan.id)
+    transaction=LoanDisbursement(loan_id=loan.id,amount_pesewas=amount,reference=data.reference,
+        disbursed_on=data.transaction_date,recorded_by=user.id)
+    db.add(transaction);db.flush()
+    evidence.record_id=transaction.id
+    db.flush()
+    if disbursed+amount==loan.approved_pesewas:
+        make_schedule(db,loan);loan.status='active'
+    audit(db,user,'disburse','loan_account',loan.id,json.dumps({
+        'amount_ghs':float(data.amount_ghs),'reference':data.reference,'evidence_id':evidence.id,
+    }));db.commit()
+    return view(db,loan)
+
+@app.post('/finance/loans/{loan_id}/repayments',status_code=201,tags=TAG)
+def record_repayment(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
+    loan=loan_for_lender(db,loan_id,user,('owner','officer'))
+    if loan.status!='active': raise HTTPException(409,'Loan is not active')
+    if db.scalar(select(LoanRepayment.id).where(LoanRepayment.loan_id==loan.id,LoanRepayment.reference==data.reference)) is not None:
+        raise HTTPException(409,'Repayment reference already recorded')
+    if data.transaction_date>date.today(): raise HTTPException(422,'Future repayment cannot be recorded')
+    amount=cents(data.amount_ghs)
+    disbursed,paid_p,paid_i,interest=sums(db,loan)
+    remaining_interest=interest-paid_i
+    fees_paid=db.scalar(select(func.coalesce(func.sum(LoanRepayment.fees_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
+    remaining_fees=loan_fee_total(loan)-fees_paid
+    remaining_principal=disbursed-paid_p
+    if amount>remaining_interest+remaining_fees+remaining_principal: raise HTTPException(422,'Payment exceeds outstanding scheduled balance')
+    evidence=required_loan_evidence(db,data.evidence_id,loan.farm_id,'repayment',user.id,loan.id)
+    interest_part=min(amount,remaining_interest)
+    fees_part=min(amount-interest_part,remaining_fees)
+    principal_part=amount-interest_part-fees_part
+    transaction=LoanRepayment(loan_id=loan.id,amount_pesewas=amount,interest_pesewas=interest_part,
+        fees_pesewas=fees_part,principal_pesewas=principal_part,reference=data.reference,
+        paid_on=data.transaction_date,recorded_by=user.id)
+    db.add(transaction);db.flush()
+    evidence.record_id=transaction.id
+    if amount==remaining_interest+remaining_fees+remaining_principal: loan.status='repaid'
+    audit(db,user,'repay','loan_account',loan.id,json.dumps({
+        'amount_ghs':float(data.amount_ghs),'reference':data.reference,'evidence_id':evidence.id,
+        'interest_ghs':ghs(interest_part),'fees_ghs':ghs(fees_part),'principal_ghs':ghs(principal_part),
+    }));db.commit()
+    return view(db,loan)
+
+@app.get('/finance/loans/{loan_id}',tags=TAG)
+def lender_loan(loan_id:int,user:CurrentUser,db:Db):
+    return view(db,loan_for_view(db,loan_id,user))
+
+@app.get('/farms/{farm_id}/loans',tags=TAG)
+def farmer_loans(farm_id:int,user:CurrentUser,db:Db):
+    owned_farm(farm_id,user,db)
+    return [view(db,loan) for loan in db.scalars(select(LoanAccount).where(LoanAccount.farm_id==farm_id).order_by(LoanAccount.id.desc())).all()]
+
+@app.get('/finance/institutions/{institution_id}/loans',tags=TAG)
+def lender_loans(institution_id:int,user:CurrentUser,db:Db):
+    member(db,institution_id,user.id)
+    return [view(db,loan) for loan in db.scalars(select(LoanAccount).where(LoanAccount.institution_id==institution_id).order_by(LoanAccount.id.desc())).all()]
+
+@app.get('/finance/institutions/{institution_id}/portfolio',tags=TAG)
+def lender_portfolio(institution_id:int,user:CurrentUser,db:Db):
+    member(db,institution_id,user.id)
+    loans=db.scalars(select(LoanAccount).where(LoanAccount.institution_id==institution_id)).all()
+    today=date.today()
+    totals={'disbursed':0,'collected':0,'outstanding_principal':0,'outstanding_interest':0,
+            'outstanding_fees':0,'due_through_today':0,'overdue_amount':0,'overdue_loans':0}
+    for loan in loans:
+        disbursed,paid_principal,paid_interest,scheduled_total_interest=sums(db,loan)
+        fees=loan_fee_total(loan) if loan.status!='awaiting_disbursement' else 0
+        fees_paid=db.scalar(select(func.coalesce(func.sum(LoanRepayment.fees_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
+        paid=paid_principal+paid_interest+fees_paid
+        outstanding_principal=disbursed-paid_principal
+        outstanding_interest=scheduled_total_interest-paid_interest
+        totals['disbursed']+=disbursed
+        totals['collected']+=paid
+        totals['outstanding_principal']+=outstanding_principal
+        totals['outstanding_interest']+=outstanding_interest
+        totals['outstanding_fees']+=fees-fees_paid
+        cumulative=0
+        previous_unpaid=0
+        overdue_amount=0
+        if loan.status!='awaiting_disbursement':
+            for installment in db.scalars(select(LoanInstallment).where(LoanInstallment.loan_id==loan.id).order_by(LoanInstallment.number)).all():
+                installment_total=installment.principal_pesewas+installment.interest_pesewas+installment.fees_pesewas
+                cumulative+=installment_total
+                if installment.due_on<=today:
+                    totals['due_through_today']+=installment_total
+                unpaid_to_date=max(0,cumulative-paid)
+                installment_unpaid=max(0,unpaid_to_date-previous_unpaid)
+                if installment.due_on<today:
+                    overdue_amount+=installment_unpaid
+                previous_unpaid=unpaid_to_date
+        if overdue_amount:
+            totals['overdue_loans']+=1
+            totals['overdue_amount']+=overdue_amount
+    total_balance=totals['outstanding_principal']+totals['outstanding_interest']
+    total_balance+=totals['outstanding_fees']
+    due=totals['due_through_today']
+    performance=round(min(totals['collected'],due)/due*100,2) if due else None
+    return {'institution_id':institution_id,'loan_accounts':len(loans),
+        'active_loans':sum(loan.status=='active' for loan in loans),
+        'total_disbursements_ghs':ghs(totals['disbursed']),
+        'total_collections_ghs':ghs(totals['collected']),
+        'outstanding_principal_ghs':ghs(totals['outstanding_principal']),
+        'outstanding_interest_ghs':ghs(totals['outstanding_interest']),
+        'outstanding_fees_ghs':ghs(totals['outstanding_fees']),
+        'outstanding_balance_ghs':ghs(total_balance),
+        'overdue_loans':totals['overdue_loans'],
+        'arrears_ghs':ghs(totals['overdue_amount']),
+        'repayment_performance_pct':performance}
+
+@app.get('/finance/loans/{loan_id}/schedule',tags=TAG)
+def loan_schedule(loan_id:int,user:CurrentUser,db:Db):
+    loan=loan_for_view(db,loan_id,user)
+    return [{'number':x.number,'due_on':x.due_on,'principal_ghs':ghs(x.principal_pesewas),
+             'interest_ghs':ghs(x.interest_pesewas),'fees_ghs':ghs(x.fees_pesewas),
+             'total_ghs':ghs(x.principal_pesewas+x.interest_pesewas+x.fees_pesewas)}
+            for x in db.scalars(select(LoanInstallment).where(LoanInstallment.loan_id==loan.id).order_by(LoanInstallment.number)).all()]
+
+@app.get('/finance/loans/{loan_id}/transactions',tags=TAG)
+def loan_transactions(loan_id:int,user:CurrentUser,db:Db):
+    loan=loan_for_view(db,loan_id,user)
+    dis=[]
+    for row in db.scalars(select(LoanDisbursement).where(LoanDisbursement.loan_id==loan.id)).all():
+        evidence=db.scalar(select(LoanEvidence).where(
+            LoanEvidence.loan_id==loan.id,LoanEvidence.record_type=='disbursement',LoanEvidence.record_id==row.id))
+        dis.append({'type':'disbursement','date':row.disbursed_on,'reference':row.reference,
+            'amount_ghs':ghs(row.amount_pesewas),'recorded_by':row.recorded_by,
+            'evidence_id':evidence.id if evidence else None,
+            'evidence_media_type':evidence.media_type if evidence else None,
+            'evidence_metadata':loan_evidence_view(evidence) if evidence else None})
+    rep=[]
+    for row in db.scalars(select(LoanRepayment).where(LoanRepayment.loan_id==loan.id)).all():
+        evidence=db.scalar(select(LoanEvidence).where(
+            LoanEvidence.loan_id==loan.id,LoanEvidence.record_type=='repayment',LoanEvidence.record_id==row.id))
+        rep.append({'type':'repayment','date':row.paid_on,'reference':row.reference,
+            'amount_ghs':ghs(row.amount_pesewas),'principal_ghs':ghs(row.principal_pesewas),
+            'interest_ghs':ghs(row.interest_pesewas),'fees_ghs':ghs(row.fees_pesewas),
+            'recorded_by':row.recorded_by,'evidence_id':evidence.id if evidence else None,
+            'evidence_media_type':evidence.media_type if evidence else None,
+            'evidence_metadata':loan_evidence_view(evidence) if evidence else None})
+    return sorted(dis+rep,key=lambda x:(x['date'],x['reference']))
+
+@app.get('/farms/{farm_id}/loan-reminders',tags=TAG)
+def farmer_reminders(farm_id:int,user:CurrentUser,db:Db):
+    owned_farm(farm_id,user,db)
+    result=[]; today=date.today()
+    for loan in db.scalars(select(LoanAccount).where(LoanAccount.farm_id==farm_id,LoanAccount.status=='active')).all():
+        _,paid_p,paid_i,_=sums(db,loan)
+        fees_paid=db.scalar(select(func.coalesce(func.sum(LoanRepayment.fees_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
+        paid=paid_p+paid_i+fees_paid
+        cumulative=0
+        for inst in db.scalars(select(LoanInstallment).where(LoanInstallment.loan_id==loan.id).order_by(LoanInstallment.number)).all():
+            cumulative+=inst.principal_pesewas+inst.interest_pesewas+inst.fees_pesewas
+            unpaid=max(0,cumulative-paid)
+            if unpaid and inst.due_on<=date.fromordinal(today.toordinal()+30):
+                result.append({'loan_id':loan.id,'installment':inst.number,'due_on':inst.due_on,
+                    'amount_due_to_date_ghs':ghs(unpaid),'status':'overdue' if inst.due_on<today else 'upcoming'})
+    return result
