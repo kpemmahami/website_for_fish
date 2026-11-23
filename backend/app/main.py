@@ -15,12 +15,14 @@ from sqlalchemy import DateTime, ForeignKey, String, Float, Text, Boolean, creat
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
-DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///./aquafarm.db')
+from .database import database_url
+
+DATABASE_URL = database_url()
 SECRET_KEY = os.getenv('SECRET_KEY')
 if not SECRET_KEY or len(SECRET_KEY) < 32:
     raise RuntimeError('Set SECRET_KEY to a random string of at least 32 characters.')
 TOKEN_MINUTES = int(os.getenv('ACCESS_TOKEN_MINUTES', '60'))
-engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False} if DATABASE_URL.startswith('sqlite') else {}, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False} if DATABASE_URL.get_backend_name() == 'sqlite' else {}, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 password_hash = PasswordHash.recommended()
 bearer = HTTPBearer()

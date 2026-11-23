@@ -39,7 +39,7 @@ class LoanAccount(Base):
     processing_fee_rate_bps: Mapped[int | None] = mapped_column(Integer)
     insurance_fee_rate_bps: Mapped[int | None] = mapped_column(Integer)
     insurance_fee_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default='awaiting_disbursement')
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default='awaiting_disbursement')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 class LoanDisbursement(Base):

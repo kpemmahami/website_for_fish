@@ -3,9 +3,26 @@ import tempfile
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
-fd, path = tempfile.mkstemp(suffix='.db')
-os.close(fd)
-os.environ['DATABASE_URL'] = f'sqlite:///{path}'
+test_postgres_url = os.getenv('AQUAFARM_TEST_POSTGRES_URL')
+if test_postgres_url:
+    from sqlalchemy import create_engine, inspect
+    from sqlalchemy.engine import make_url
+
+    url = make_url(test_postgres_url)
+    if (url.drivername != 'postgresql+psycopg' or url.host not in ('127.0.0.1', '::1')
+        or not (url.database or '').startswith('aquafarm_test_')):
+        raise RuntimeError('Use a disposable loopback PostgreSQL database named aquafarm_test_*.')
+    test_engine = create_engine(url)
+    try:
+        if inspect(test_engine).get_table_names(schema='public'):
+            raise RuntimeError('The PostgreSQL test database must be empty.')
+    finally:
+        test_engine.dispose()
+    os.environ['DATABASE_URL'] = test_postgres_url
+else:
+    fd, path = tempfile.mkstemp(suffix='.db')
+    os.close(fd)
+    os.environ['DATABASE_URL'] = f'sqlite:///{path}'
 os.environ['SECRET_KEY'] = 'test-secret-key-that-is-at-least-32-characters'
 os.environ['AQUAFARM_DAILY_RECORD_REMINDERS_ENABLED'] = 'false'
 from fastapi.testclient import TestClient

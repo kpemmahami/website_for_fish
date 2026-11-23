@@ -40,8 +40,50 @@ Run tests:
 pytest -q
 ```
 
-## PostgreSQL later
-Set `DATABASE_URL=postgresql+psycopg://USERNAME:PASSWORD@localhost:5432/aquafarm` and install/start PostgreSQL. Use Alembic migrations before production.
+## Deploy the backend on Render with Supabase
+
+Set Render's root directory to `backend` and runtime to Python. Use
+`pip install -r requirements.txt` as the build command and
+`uvicorn app.main:app --host 0.0.0.0 --port "$PORT"` as the start command.
+Render supplies `PORT`. The health-check path is `/health`.
+
+In Render's environment settings, set:
+
+- `DATABASE_URL` to the Session pooler URI from Supabase's Connect panel.
+  Use port `5432` and the username displayed by Supabase. URL-encode any
+  reserved characters in the password. The app selects Psycopg 3 for
+  `postgresql://` and `postgres://` URIs.
+- `SECRET_KEY` to the existing signing key for this deployment. Keep its
+  value in the deployment environment.
+
+Both the API and Alembic add `sslmode=require` to Supabase URLs that omit
+it. To verify the server identity as well as encrypt the connection,
+provide the Supabase CA file on the host and add
+`sslmode=verify-full&sslrootcert=/absolute/path/to/supabase-ca.crt` to the
+URL. Locally, an unset `DATABASE_URL` still selects SQLite. On Render,
+an unset or SQLite URL fails at startup to prevent accidental use of
+an ephemeral database.
+
+Run migrations explicitly from `backend` in a secure shell configured with
+the target database URL and the deployment signing key. Check the target,
+take a backup if it contains records, and run one upgrade process:
+
+```sh
+python -m alembic heads
+python -m alembic current
+python -m alembic upgrade head
+python -m alembic current
+```
+
+Use Render's pre-deploy command for the upgrade where available. On the
+Free plan, run it separately from a trusted workstation or CI runner with
+access to the Session pooler before deploying the web service. Application
+startup never runs migrations or copies local data.
+
+The backend tests default to an isolated SQLite file. To test PostgreSQL,
+set `AQUAFARM_TEST_POSTGRES_URL` to a **new, empty loopback PostgreSQL
+database** named `aquafarm_test_*`, using the `postgresql+psycopg://`
+scheme, then run `python -m pytest -q` from `backend`.
 
 ## Important limitations
 This is a backend-only development starter, **not production ready**. It lacks email verification, password resets, rate limiting, audit trails, production migrations, backups, billing, refresh tokens, staff roles, and a mobile UI. Do not expose it publicly until those are addressed. Deleting a farm is permanent in this prototype; use soft deletion for commercial operation.

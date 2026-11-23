@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 
 TEST_DATABASE = Path(__file__).resolve().parent.parent / 'aquafarm.local-test.db'
 DEVELOPMENT_ACCOUNTS = {
@@ -14,7 +14,7 @@ DEVELOPMENT_ACCOUNTS = {
 }
 
 
-def enabled(database_url: str) -> bool:
+def enabled(database_url: str | URL) -> bool:
     if os.environ.get('AQUAFARM_ENV') != 'local-test':
         return False
     url = make_url(database_url)
