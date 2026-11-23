@@ -1,7 +1,7 @@
 ﻿import {AlertTriangle, X} from 'lucide-react';
 
 const fields:Record<string,string>={
- email:'email address',full_name:'full name',password:'password',name:'name',quantity_kg:'quantity',
+ email:'email address',full_name:'full name',password:'password',business_type:'business type',name:'name',quantity_kg:'quantity',
  amount_ghs:'payment amount',requested_ghs:'requested amount',price_ghs_per_kg:'selling price',
  feed_id:'feed type',session_number:'feeding session',actual_fed_at:'actual feeding time',
  dead_count:'fish count',stocked_count:'stocking quantity',expected_harvest_on:'harvest date',
@@ -110,6 +110,14 @@ export class UserFacingError extends Error{
 }
 
 export function friendlyApiError(path:string,method:string,status:number,detail:unknown){
+ const registration=method==='POST'&&['/auth/register','/auth/farmer/register'].includes(path);
+ if(registration){
+  if(status===0)return 'Unable to connect to the server. Check your internet connection.';
+  if(status===409&&detail==='Email already registered')return 'This email address is already registered.';
+  if(status===422||status===400)return validationMessage(detail)||'Please check the information you entered.';
+  if(status===429)return 'Too many requests. Please wait and try again.';
+  return 'Registration is temporarily unavailable. Please try again.';
+ }
  const login=/^\/auth\/(?:[^/]+\/)?login$/.test(path);
  if(status===0)return 'Unable to connect. Please check your connection.';
  if(status===401)return login?'Incorrect username or password.':'Your session has expired. Please log in again.';

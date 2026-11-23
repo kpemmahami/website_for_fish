@@ -1,18 +1,24 @@
+import logging
 import os
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
 from pwdlib import PasswordHash
 from sqlalchemy import DateTime, ForeignKey, String, Float, Text, Boolean, create_engine, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .database import database_url
@@ -252,22 +258,61 @@ def new_user(data: Register, account_type: str) -> User:
                 password_hash=password_hash.hash(data.password), account_type=account_type)
 
 
+FARMER_REGISTRATION_PATHS = {'/auth/register', '/auth/farmer/register'}
+registration_log = logging.getLogger('aquafarm.registration')
+
+
+@app.exception_handler(RequestValidationError)
+async def safe_registration_validation(request: Request, error: RequestValidationError):
+    if request.method == 'POST' and request.url.path in FARMER_REGISTRATION_PATHS:
+        return JSONResponse({'detail': [{'loc': item['loc'], 'type': item['type']}
+                                         for item in error.errors()]}, status_code=422)
+    return await request_validation_exception_handler(request, error)
+
+
+@app.get('/ready')
+def ready(db: Db):
+    from .processing import ProcessingBusiness
+
+    try:
+        db.execute(select(User).limit(0))
+        db.execute(select(ProcessingBusiness).limit(0))
+    except SQLAlchemyError as error:
+        db.rollback()
+        registration_log.error('Registration readiness check failed. exception=%s sqlstate=%s',
+                               type(error).__name__, getattr(getattr(error, 'orig', None), 'sqlstate', None))
+        raise HTTPException(status_code=503, detail='Service is temporarily unavailable') from None
+    return {'status': 'ok'}
+
+
+def duplicate_email(error: IntegrityError) -> bool:
+    original = error.orig
+    if getattr(original, 'sqlstate', None) == '23505':
+        return getattr(getattr(original, 'diag', None), 'constraint_name', None) in ('ix_users_email', 'users_email_key')
+    return getattr(original, 'sqlite_errorname', None) == 'SQLITE_CONSTRAINT_UNIQUE' and str(original).endswith('users.email')
+
+
 @app.post('/auth/register', response_model=UserOut, status_code=201)
 @app.post('/auth/farmer/register', response_model=UserOut, status_code=201)
 def register(data: FarmerRegister, db: Db):
     user = new_user(data, 'farmer')
     db.add(user)
     try:
+        db.flush()
         if data.business_type != 'farmer':
             from .processing import ProcessingBusiness
-            db.flush()
             db.add(ProcessingBusiness(owner_id=user.id,name=data.full_name,business_type=data.business_type))
+        response = UserOut.model_validate(user)
         db.commit()
-    except IntegrityError:
+    except SQLAlchemyError as error:
         db.rollback()
-        raise HTTPException(status_code=409, detail='Email already registered')
-    db.refresh(user)
-    return user
+        if isinstance(error, IntegrityError) and duplicate_email(error):
+            raise HTTPException(status_code=409, detail='Email already registered') from None
+        original = getattr(error, 'orig', None)
+        registration_log.error('Farmer registration failed. exception=%s sqlstate=%s',
+                               type(error).__name__, getattr(original, 'sqlstate', None))
+        raise HTTPException(status_code=503, detail='Registration is temporarily unavailable') from None
+    return response
 
 
 def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token:
@@ -441,3 +486,24 @@ from . import feed_outlook
 from . import activity_history
 
 from . import processing
+
+
+def configure_cors(api: FastAPI, configured: str) -> None:
+    origins = []
+    for raw in configured.split(','):
+        origin = raw.strip().rstrip('/')
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        if (parsed.scheme not in ('https', 'http') or not parsed.hostname or parsed.username
+            or parsed.password or parsed.path or parsed.query or parsed.fragment or '*' in origin):
+            raise RuntimeError('CORS_ALLOWED_ORIGINS must contain exact HTTP(S) origins.')
+        origins.append(origin)
+    if origins:
+        api.add_middleware(CORSMiddleware, allow_origins=origins,
+                           allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD'],
+                           allow_headers=['Authorization', 'Content-Type'],
+                           expose_headers=['X-Request-ID', 'Content-Disposition'])
+
+
+configure_cors(app, os.getenv('CORS_ALLOWED_ORIGINS', ''))

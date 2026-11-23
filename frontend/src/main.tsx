@@ -1,3 +1,4 @@
+import {resolveApiBase} from './apiBase';
 import {ProcessingEvidenceLibrary} from './processingEvidence';
 import {ProcessingWorkspace} from './processingWorkspace';
 import {FarmActivityHistory, historyTabs, type HistoryContext, type HistoryTab} from './farmActivityHistory';
@@ -363,7 +364,7 @@ function App(){
    const method=init.method??'GET';
    let response:Response;
    try{
-     response=await fetch('/api'+path,{...init,headers:{...(init.body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{}),...init.headers}});
+     response=await fetch(resolveApiBase(import.meta.env.VITE_API_BASE_URL)+path,{...init,headers:{...(init.body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{}),...init.headers}});
    }catch{
      throw new UserFacingError(friendlyApiError(path,method,0,null),0);
    }

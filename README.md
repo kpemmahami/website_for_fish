@@ -64,6 +64,15 @@ URL. Locally, an unset `DATABASE_URL` still selects SQLite. On Render,
 an unset or SQLite URL fails at startup to prevent accidental use of
 an ephemeral database.
 
+For the Render static site, set the build-time variable
+`VITE_API_BASE_URL` to the backend's public HTTPS URL without a trailing
+`/api`. Set the backend's `CORS_ALLOWED_ORIGINS` to the static site's
+public origin, without a path. Separate multiple allowed origins with
+commas. Rebuild the static site after setting the variable. If the frontend
+uses a same-origin `/api/*` rewrite or the local Vite proxy, leave the
+frontend variable unset. After deployment, `GET /ready` checks database
+connectivity and the registration tables without writing a record.
+
 Run migrations explicitly from `backend` in a secure shell configured with
 the target database URL and the deployment signing key. Check the target,
 take a backup if it contains records, and run one upgrade process:
