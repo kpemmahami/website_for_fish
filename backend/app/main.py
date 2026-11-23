@@ -21,7 +21,7 @@ from sqlalchemy import DateTime, ForeignKey, String, Float, Text, Boolean, creat
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
-from .database import database_url
+from .database import database_failure_reason, database_url
 
 DATABASE_URL = database_url()
 SECRET_KEY = os.getenv('SECRET_KEY')
@@ -279,8 +279,9 @@ def ready(db: Db):
         db.execute(select(ProcessingBusiness).limit(0))
     except SQLAlchemyError as error:
         db.rollback()
-        registration_log.error('Registration readiness check failed. exception=%s sqlstate=%s',
-                               type(error).__name__, getattr(getattr(error, 'orig', None), 'sqlstate', None))
+        registration_log.error('Registration readiness check failed. exception=%s sqlstate=%s reason=%s',
+                               type(error).__name__, getattr(getattr(error, 'orig', None), 'sqlstate', None),
+                               database_failure_reason(DATABASE_URL, error))
         raise HTTPException(status_code=503, detail='Service is temporarily unavailable') from None
     return {'status': 'ok'}
 
@@ -309,8 +310,9 @@ def register(data: FarmerRegister, db: Db):
         if isinstance(error, IntegrityError) and duplicate_email(error):
             raise HTTPException(status_code=409, detail='Email already registered') from None
         original = getattr(error, 'orig', None)
-        registration_log.error('Farmer registration failed. exception=%s sqlstate=%s',
-                               type(error).__name__, getattr(original, 'sqlstate', None))
+        registration_log.error('Farmer registration failed. exception=%s sqlstate=%s reason=%s',
+                               type(error).__name__, getattr(original, 'sqlstate', None),
+                               database_failure_reason(DATABASE_URL, error))
         raise HTTPException(status_code=503, detail='Registration is temporarily unavailable') from None
     return response
 

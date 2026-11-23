@@ -91,11 +91,11 @@ def test_cors_allows_only_configured_origins():
     assert invalid.status_code == 422
     assert invalid.headers['Access-Control-Allow-Origin'] == FRONTEND
 
-def test_readiness_verifies_registration_schema_without_exposing_details(monkeypatch):
+def test_readiness_verifies_registration_schema_without_exposing_details(monkeypatch, caplog):
     assert client.get('/ready').json() == {'status': 'ok'}
     with SessionLocal() as db:
         def fail(*args, **kwargs):
-            raise OperationalError('private query', {}, RuntimeError('private URI'))
+            raise OperationalError('private query', {}, RuntimeError('connection refused while using private URI'))
 
         monkeypatch.setattr(db, 'execute', fail)
         app.dependency_overrides[get_db] = lambda: db
@@ -105,6 +105,8 @@ def test_readiness_verifies_registration_schema_without_exposing_details(monkeyp
             app.dependency_overrides.pop(get_db)
         assert result.status_code == 503
         assert result.json() == {'detail': 'Service is temporarily unavailable'}
+        assert 'reason=database_network_unreachable' in caplog.text
+        assert 'private URI' not in caplog.text
 
 def test_deployed_frontend_preflight_on_actual_application():
     origin = 'https://aquafarm-ghana-frontend.onrender.com'

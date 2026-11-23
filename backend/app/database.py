@@ -35,3 +35,34 @@ def database_url() -> URL:
         elif mode not in ('require', 'verify-ca', 'verify-full'):
             raise RuntimeError('Supabase DATABASE_URL must use sslmode=require, verify-ca, or verify-full.')
     return url
+
+def database_failure_reason(url: URL, error: Exception) -> str:
+    """Return a fixed label; driver error text can contain connection details."""
+    original = getattr(error, 'orig', error)
+    code = getattr(original, 'sqlstate', None)
+    if code in ('42P01', '42703'):
+        return 'registration_schema_missing'
+    if code == '28P01':
+        return 'database_password_rejected'
+    if url.get_backend_name() == 'postgresql':
+        if not url.password:
+            return 'database_password_missing'
+        if url.password in ('[YOUR-DATABASE-PASSWORD]', 'YOUR-DATABASE-PASSWORD'):
+            return 'database_password_placeholder'
+    message = str(original).lower()
+    for phrases, reason in (
+        (('tenant or user not found', 'tenant not found', 'invalid tenant'), 'pooler_project_or_username_rejected'),
+        (('too many authentication errors', 'circuit breaker'), 'pooler_authentication_rate_limited'),
+        (('password authentication failed', 'invalid user or password', 'sasl authentication'), 'database_login_rejected'),
+        (('max client connections', 'maxclientsinsessionmode', 'too many connections'), 'pooler_connection_limit'),
+        (('certificate verify failed', 'certificate', 'ssl error', 'ssl syscall'), 'tls_connection_failed'),
+        (('could not translate host', 'name or service not known', 'nodename nor servname'), 'database_hostname_unresolved'),
+        (('connection timeout', 'timeout expired', 'timed out'), 'database_connection_timed_out'),
+        (('network is unreachable', 'no route to host', 'connection refused'), 'database_network_unreachable'),
+        (('database does not exist', 'invalid catalog name'), 'database_name_rejected'),
+        (('no pg_hba.conf entry', 'ip address is not allowed'), 'database_client_access_rejected'),
+        (('server closed the connection', 'connection reset by peer'), 'database_connection_closed'),
+    ):
+        if any(phrase in message for phrase in phrases):
+            return reason
+    return 'database_error_unclassified'
