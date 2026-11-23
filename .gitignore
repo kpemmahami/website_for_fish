@@ -27,3 +27,21 @@ mobile/android/local.properties
 .idea/
 .vscode/
 .DS_Store
+
+
+# Local data, credentials, and generated files
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.tsbuildinfo
+.pytest-report-*/
+*.backup
+/backend/app/main (2).py
+/private_evidence/
+**/uploads/
+*.pem
+*.key
+*.p12

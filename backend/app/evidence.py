@@ -621,7 +621,8 @@ def download_evidence(farm_id: int, evidence_id: int, user: CurrentUser, db: Db)
     path = evidence_directory() / item.storage_name
     if not path.is_file():
         raise HTTPException(404, 'Stored video evidence is missing')
-    return FileResponse(path, media_type=item.media_type, filename=f'daily-record-{item.id}{path.suffix}')
+    return FileResponse(path, media_type=item.media_type, filename=f'daily-record-{item.id}{path.suffix}',
+                        headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
 
 
 @app.delete('/farms/{farm_id}/evidence/{evidence_id}', status_code=204, tags=['Daily farm operations'])

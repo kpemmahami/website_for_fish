@@ -2,3 +2,4 @@ private_evidence/
 .env
 .env.*
 !.env.example
+aquafarm.local-test.db*

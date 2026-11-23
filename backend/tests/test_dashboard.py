@@ -83,7 +83,14 @@ def test_analytics_growth_harvest_feed_water_and_financial_forecasts():
             FeedLedger(feed_id=feed.id,event_type='feeding',quantity_delta_kg=-50,
                 cycle_id=cycle.id,occurred_on=today-timedelta(days=5)),
         ])
-        db.add(ProductionPlan(farm_id=farm_id,cycle_id=cycle.id,species='Tilapia',
+        db.commit()
+
+    before_plan = client.get(f'/farms/{farm_id}/dashboard', headers=farmer)
+    assert before_plan.status_code == 200, before_plan.text
+    assert before_plan.json()['costs']['recorded_costs_to_date_ghs'] == 100
+    assert before_plan.json()['feed']['consumed_kg'] == 50
+    with SessionLocal() as db:
+        db.add(ProductionPlan(farm_id=farm_id,cycle_id=cycle_id,species='Tilapia',
             fingerling_count=1000,initial_weight_g=10,target_weight_g=500,
             survival_pct=90,expected_fcr=1.5,feed_price_ghs_per_kg=2,
             bag_size_kg=25,fingerling_cost_ghs=100,other_budget_ghs=50,
@@ -95,6 +102,8 @@ def test_analytics_growth_harvest_feed_water_and_financial_forecasts():
     analytics=response.json()
     assert analytics['summary']['expected_harvest_kg']==450
     assert analytics['summary']['estimated_live_fish']==900
+    growth = analytics['production']['growth_trends']
+    assert [row['estimated_biomass_kg'] for row in growth] == [100, 200]
     forecast=analytics['production']['harvest_forecasts'][0]
     assert forecast['expected_harvest_on']==(today+timedelta(days=20)).isoformat()
     assert forecast['date_basis']=='linear_projection_from_last_two_samples'
@@ -109,6 +118,38 @@ def test_analytics_growth_harvest_feed_water_and_financial_forecasts():
     assert pricing['recommended_price_ghs_per_kg']==2.83
     assert pricing['projected_revenue_ghs']>pricing['projected_cycle_total_cost_ghs']
     assert pricing['projected_profit_ghs']>0
+    report_base = f'/farms/{farm_id}/reports'
+    period = {'start': (today-timedelta(days=16)).isoformat(), 'end': today.isoformat()}
+    scoped = {**period, 'cycle_id': cycle_id}
+    feed_report = client.post(report_base+'/feed-activity', headers=farmer, json=scoped)
+    assert feed_report.status_code == 200, feed_report.text
+    assert feed_report.json()['purchased_kg'] is None
+    assert feed_report.json()['consumed_kg'] == 50
+    assert feed_report.json()['consumption'][0]['unit'] == 'North Pond'
+    whole_feed = client.post(report_base+'/feed-activity', headers=farmer, json=period)
+    assert whole_feed.json()['purchased_kg'] == 100
+    assert client.post(report_base+'/feed-activity', headers=farmer,
+                       json={**period, 'unit_ids': [999999]}).status_code == 404
+
+    sections = ['production','feeding','growth','water','harvest','sales','expenses','cash','profitability','loans']
+    report = client.post(report_base+'/complete', headers=farmer, json={**period, 'sections': sections})
+    assert report.status_code == 200, report.text
+    rows = report.json()['rows']
+    growth_rows = [row for row in rows if row['section'] == 'Growth']
+    assert len(growth_rows) == 1 and '200.00 g' in growth_rows[0]['detail']
+    assert any(row['section'] == 'Feed Inventory' and '50.00 kg' in row['detail'] for row in rows)
+    assert any(row['section'] == 'Water Quality' for row in rows)
+    assert any(row['section'] == 'Mortality' and '100' in row['detail'] for row in rows)
+    pdf = client.post(report_base+'/complete.pdf', headers=farmer, json={**scoped, 'sections': sections})
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.content.startswith(b'%PDF-')
+    assert 'attachment' in pdf.headers['content-disposition']
+    other = signup('reports-other@example.com')
+    assert client.post(report_base+'/complete.pdf', headers=other,
+                       json={**period, 'sections': sections}).status_code == 404
+    assert client.post(report_base+'/complete', headers=farmer,
+                       json={**period, 'start': '2200-01-01', 'sections': sections}).status_code == 422
+
     updated=client.patch(f'/farms/{farm_id}/production-plans/{pricing["plan_id"]}/pricing',
         headers=farmer,json={'desired_profit_pct':30,'profit_method':'markup',
             'market_price_ghs_per_kg':3.5})

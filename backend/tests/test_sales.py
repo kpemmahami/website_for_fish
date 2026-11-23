@@ -82,3 +82,30 @@ def test_small_sales_use_walk_in_and_large_sales_require_registration():
         'price_ghs_per_kg': '35.00',
     }, headers=farmer)
     assert large_sale.status_code == 201, large_sale.text
+    today = date.today().isoformat()
+    evidence = upload_operation_evidence(farm_id, unit_data, farmer, 'sale_dispatch', cycle_id)
+    sale = client.post(f'/farms/{farm_id}/sales/transactions', params={'evidence_id': evidence.json()['id']}, json={
+        'harvest_lot_id': lot_id, 'customer_id': customer.json()['id'], 'sold_on': today, 'due_on': today,
+        'quantity_kg': 100, 'price_ghs_per_kg': '30.00',
+        'initial_payment': {'amount_ghs': '2000', 'paid_on': today, 'method': 'cash', 'reference': 'DEPOSIT'},
+    }, headers=farmer)
+    assert sale.status_code == 201, sale.text
+    record = sale.json()
+    assert (record['total_ghs'], record['paid_ghs'], record['outstanding_ghs']) == (3000, 2000, 1000)
+    url = f"/farms/{farm_id}/sales/transactions/{record['id']}"
+    invoice = client.get(url+'/invoice.pdf', headers=farmer)
+    assert invoice.content.startswith(b'%PDF-')
+    assert invoice.headers['content-type'] == 'application/pdf'
+    assert record['invoice_number'] + '.pdf' in invoice.headers['content-disposition']
+    stranger = signup('unauthorized-invoice@example.com')
+    assert client.get(url+'/invoice.pdf', headers=stranger).status_code == 404
+    payment = {'amount_ghs':'1000','paid_on':today,'method':'bank_transfer','reference':'FINAL'}
+    assert client.post(url+'/payments', json={**payment, 'amount_ghs':'1001'}, headers=farmer).status_code == 409
+    settled = client.post(url+'/payments', json=payment, headers=farmer)
+    assert settled.json()['sale']['outstanding_ghs'] == 0
+    assert client.post(url+'/payments', json=payment, headers=farmer).status_code == 409
+    assert len(client.get(url+'/payments', headers=farmer).json()) == 2
+    dashboard = client.get(f'/farms/{farm_id}/dashboard', headers=farmer).json()['sales']
+    assert dashboard['payments_received_ghs'] == 3000
+    assert dashboard['available_harvest_kg'] == 375
+    assert dashboard['outstanding_receivables_ghs'] == 18375

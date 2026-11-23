@@ -9,10 +9,10 @@ from typing import Literal
 from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func
+from sqlalchemy import update, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import Base, app, Db, CurrentUser, owned_farm, audit
-from .lending import LoanApplication, LoanDecision, member, ghs
+from .lending import Institution, LoanApplication, LoanDecision, member, ghs
 
 TAG = ['Loan disbursement and recovery (manual ledger)']
 def utcnow(): return datetime.now(timezone.utc)
@@ -36,6 +36,8 @@ class LoanAccount(Base):
     term_months: Mapped[int] = mapped_column(Integer, nullable=False)
     commitment_fee_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     processing_fee_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processing_fee_rate_bps: Mapped[int | None] = mapped_column(Integer)
+    insurance_fee_rate_bps: Mapped[int | None] = mapped_column(Integer)
     insurance_fee_pesewas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='awaiting_disbursement')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -113,12 +115,16 @@ class OpenLoanIn(BaseModel):
     annual_flat_interest_percent: Decimal = Field(ge=0, le=100, max_digits=5, decimal_places=2)
     commitment_fee_ghs: Decimal = Field(default=Decimal('0'), ge=0, max_digits=14, decimal_places=2)
     processing_fee_ghs: Decimal = Field(default=Decimal('0'), ge=0, max_digits=14, decimal_places=2)
+    processing_fee_percent: Decimal | None = Field(default=None, ge=0, le=100, max_digits=5, decimal_places=2)
+    insurance_fee_percent: Decimal = Field(default=Decimal('1'), ge=0, le=100, max_digits=5, decimal_places=2)
     repayment_frequency: Literal['monthly','quarterly','harvest','custom']
     first_due_date: date
     custom_schedule: list[CustomInstallmentIn] | None = Field(default=None, min_length=1, max_length=240)
 
     @model_validator(mode='after')
     def validate_custom_schedule(self):
+        if self.processing_fee_percent is not None and self.processing_fee_ghs:
+            raise ValueError('Enter processing as either a percentage or a fixed amount')
         if self.repayment_frequency == 'custom':
             if not self.custom_schedule:
                 raise ValueError('Custom repayment schedules require at least one installment')
@@ -137,10 +143,10 @@ class TransactionIn(BaseModel):
     transaction_date: date
     evidence_id: int = Field(gt=0)
 
-def loan_for_lender(db, loan_id, user, roles=('owner','officer','reviewer')):
+def loan_for_lender(db, loan_id, user, permission='view'):
     loan=db.get(LoanAccount,loan_id)
     if loan is None: raise HTTPException(404,'Loan not found')
-    member(db,loan.institution_id,user.id,roles)
+    member(db,loan.institution_id,user.id,permission)
     return loan
 
 def loan_for_view(db, loan_id, user):
@@ -157,7 +163,7 @@ def sums(db, loan):
     disbursed=db.scalar(select(func.coalesce(func.sum(LoanDisbursement.amount_pesewas),0)).where(LoanDisbursement.loan_id==loan.id))
     repaid_principal=db.scalar(select(func.coalesce(func.sum(LoanRepayment.principal_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
     repaid_interest=db.scalar(select(func.coalesce(func.sum(LoanRepayment.interest_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
-    scheduled_interest=0 if loan.status=='awaiting_disbursement' else db.scalar(
+    scheduled_interest=0 if loan.status in ('offered','declined','awaiting_disbursement') else db.scalar(
         select(func.coalesce(func.sum(LoanInstallment.interest_pesewas),0)).where(LoanInstallment.loan_id==loan.id))
     return disbursed,repaid_principal,repaid_interest,scheduled_interest
 
@@ -309,19 +315,18 @@ def view(db,loan):
         'commitment_fee_ghs':ghs(loan.commitment_fee_pesewas),
         'processing_fee_ghs':ghs(loan.processing_fee_pesewas),
         'insurance_fee_ghs':ghs(loan.insurance_fee_pesewas),
+        'processing_fee_percent':None if loan.processing_fee_rate_bps is None else loan.processing_fee_rate_bps/100,
+        'insurance_fee_percent':None if loan.insurance_fee_rate_bps is None else loan.insurance_fee_rate_bps/100,
         'total_fees_ghs':ghs(fees),
         'fees_paid_ghs':ghs(fees_paid),
         'outstanding_fees_ghs':ghs(fees-fees_paid),
         'total_contract_repayment_ghs':ghs(total_contract),
-        'total_scheduled_balance_ghs':ghs(max(0,current_balance)) if loan.status != 'awaiting_disbursement' else 0,
+        'total_scheduled_balance_ghs':ghs(max(0,current_balance)) if loan.status in ('active','repaid') else 0,
         'annual_flat_interest_percent':loan.annual_flat_rate_bps/100,
-        'repayment_frequency':loan.frequency,'first_due_date':loan.first_due_date,
-        'note':'Flat simple interest; insurance is 1% of approved principal. Commitment and processing fees are lender-entered fixed GHS amounts. No penalties, variable rates or bank settlement verification.'}
+        'repayment_frequency':loan.frequency,'first_due_date':loan.first_due_date,'term_months':loan.term_months,
+        'note':'Interest is flat over the approved term. Percentage-based fees are calculated separately on approved principal.'}
 
-def make_schedule(db,loan):
-    principal,_,_,_=sums(db,loan)
-    if loan.frequency == 'custom':
-        return
+def standard_installments(loan, principal):
     count={'monthly':loan.term_months,'quarterly':(loan.term_months+2)//3,'harvest':1}[loan.frequency]
     # Flat simple interest on fully disbursed principal, not reducing-balance interest.
     interest=scheduled_interest(principal,loan.annual_flat_rate_bps,loan.term_months)
@@ -332,8 +337,14 @@ def make_schedule(db,loan):
         i=interest//count+(interest%count if n==count-1 else 0)
         f=fees//count+(fees%count if n==count-1 else 0)
         due=add_months(loan.first_due_date,n*step) if step else loan.first_due_date
-        db.add(LoanInstallment(loan_id=loan.id,number=n+1,due_on=due,
-            principal_pesewas=p,interest_pesewas=i,fees_pesewas=f))
+        yield LoanInstallment(loan_id=loan.id, number=n+1, due_on=due,
+            principal_pesewas=p, interest_pesewas=i, fees_pesewas=f)
+
+
+def make_schedule(db, loan):
+    if loan.frequency != 'custom':
+        principal, _, _, _ = sums(db, loan)
+        db.add_all(standard_installments(loan, principal))
 
 
 @app.post('/farms/{farm_id}/loan-evidence',status_code=201,tags=TAG)
@@ -352,7 +363,7 @@ async def upload_transaction_evidence(
     record_type:Literal['disbursement','repayment'],
     captured_at:datetime,device_recorded_at:datetime,duration_seconds:int,
 ):
-    loan=loan_for_lender(db,loan_id,user,('owner','officer'))
+    loan=loan_for_lender(db,loan_id,user,'disburse' if record_type=='disbursement' else 'repay')
     return await store_loan_evidence(
         loan.farm_id,record_type,loan.id,request,captured_at,device_recorded_at,duration_seconds,user,db)
 
@@ -383,7 +394,7 @@ def download_loan_evidence(evidence_id:int,user:CurrentUser,db:Db):
 
 @app.post('/finance/institutions/{institution_id}/loans',status_code=201,tags=TAG)
 def open_loan(institution_id:int,data:OpenLoanIn,user:CurrentUser,db:Db):
-    member(db,institution_id,user.id,('owner','reviewer'))
+    member(db,institution_id,user.id,'appraise')
     application=db.get(LoanApplication,data.application_id)
     if application is None or application.institution_id!=institution_id: raise HTTPException(404,'Approved application not found')
     if application.status!='approved': raise HTTPException(409,'Application not approved')
@@ -394,27 +405,29 @@ def open_loan(institution_id:int,data:OpenLoanIn,user:CurrentUser,db:Db):
     if data.custom_schedule and data.custom_schedule[-1].due_on > add_months(data.first_due_date,application.term_months-1):
         raise HTTPException(422,'Custom installments must fit within the approved repayment term')
     approved=decision.approved_pesewas
+    annual_rate_bps = int(data.annual_flat_interest_percent * 100)
+    processing_rate = data.processing_fee_percent
+    insurance_rate = data.insurance_fee_percent
+    commitment_fee = cents(data.commitment_fee_ghs)
+    processing_fee = cents(data.processing_fee_ghs if processing_rate is None else Decimal(approved) * processing_rate / 10000)
+    insurance_fee = cents(Decimal(approved) * insurance_rate / 10000)
     if data.custom_schedule:
         custom_principal=sum(cents(item.principal_ghs) for item in data.custom_schedule)
         custom_interest=sum(cents(item.interest_ghs) for item in data.custom_schedule)
-        commitment_fee=cents(data.commitment_fee_ghs)
-        processing_fee=cents(data.processing_fee_ghs)
-        insurance_fee=cents(Decimal(approved)/100*Decimal('0.01'))
-        expected_interest=scheduled_interest(approved,int((data.annual_flat_interest_percent*100).quantize(Decimal('1'))),application.term_months)
+        expected_interest = scheduled_interest(approved, annual_rate_bps, application.term_months)
         if custom_principal!=approved:
             raise HTTPException(422,'Custom installment principal must equal the approved loan amount')
         if custom_interest!=expected_interest:
             raise HTTPException(422,'Custom installment interest must equal the scheduled flat interest')
         if sum(cents(item.fees_ghs) for item in data.custom_schedule)!=commitment_fee+processing_fee+insurance_fee:
-            raise HTTPException(422,'Custom installment fees must equal the commitment, processing, and 1% insurance fees')
-    else:
-        commitment_fee=cents(data.commitment_fee_ghs)
-        processing_fee=cents(data.processing_fee_ghs)
-        insurance_fee=cents(Decimal(approved)/100*Decimal('0.01'))
+            raise HTTPException(422,'Custom installment fees must equal the commitment, processing, and insurance fees')
     loan=LoanAccount(application_id=application.id,institution_id=institution_id,farm_id=application.farm_id,
-        approved_pesewas=approved,annual_flat_rate_bps=int((data.annual_flat_interest_percent*100).quantize(Decimal('1'))),
+        approved_pesewas=approved,annual_flat_rate_bps=annual_rate_bps,
         frequency=data.repayment_frequency,first_due_date=data.first_due_date,term_months=application.term_months,
-        commitment_fee_pesewas=commitment_fee,processing_fee_pesewas=processing_fee,insurance_fee_pesewas=insurance_fee)
+        status='offered',
+        commitment_fee_pesewas=commitment_fee,processing_fee_pesewas=processing_fee,insurance_fee_pesewas=insurance_fee,
+        processing_fee_rate_bps=None if processing_rate is None else int(processing_rate * 100),
+        insurance_fee_rate_bps=int(insurance_rate * 100))
     db.add(loan);db.flush()
     if data.custom_schedule:
         for number,item in enumerate(data.custom_schedule,1):
@@ -424,9 +437,35 @@ def open_loan(institution_id:int,data:OpenLoanIn,user:CurrentUser,db:Db):
     audit(db,user,'open','loan_account',loan.id);db.commit()
     return view(db,loan)
 
+class LoanOfferResponse(BaseModel):
+    decision: Literal['accept', 'decline']
+
+
+@app.post('/finance/loans/{loan_id}/offer-response', tags=TAG)
+def respond_to_offer(loan_id: int, data: LoanOfferResponse, user: CurrentUser, db: Db):
+    loan = db.get(LoanAccount, loan_id)
+    if loan is None:
+        raise HTTPException(404, 'Loan not found')
+    owned_farm(loan.farm_id, user, db)
+    member_institution = db.get(Institution, loan.institution_id)
+    if member_institution is None or member_institution.status != 'verified':
+        raise HTTPException(409, 'The institution is unavailable')
+    status = 'awaiting_disbursement' if data.decision == 'accept' else 'declined'
+    if data.decision == 'accept' and loan.first_due_date <= date.today():
+        raise HTTPException(409, 'The first due date has passed. Contact the institution.')
+    result = db.execute(update(LoanAccount).where(
+        LoanAccount.id == loan_id, LoanAccount.status == 'offered',
+    ).values(status=status))
+    if result.rowcount != 1:
+        raise HTTPException(409, 'This offer is no longer awaiting a response')
+    audit(db, user, data.decision + '_offer', 'loan_account', loan_id)
+    db.commit()
+    return view(db, loan)
+
+
 @app.post('/finance/loans/{loan_id}/disbursements',status_code=201,tags=TAG)
 def record_disbursement(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
-    loan=loan_for_lender(db,loan_id,user,('owner','officer'))
+    loan=loan_for_lender(db,loan_id,user,'disburse')
     if loan.status!='awaiting_disbursement': raise HTTPException(409,'Loan not awaiting disbursement')
     if db.scalar(select(LoanDisbursement.id).where(LoanDisbursement.loan_id==loan.id,LoanDisbursement.reference==data.reference)) is not None:
         raise HTTPException(409,'Disbursement reference already recorded')
@@ -449,7 +488,7 @@ def record_disbursement(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
 
 @app.post('/finance/loans/{loan_id}/repayments',status_code=201,tags=TAG)
 def record_repayment(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
-    loan=loan_for_lender(db,loan_id,user,('owner','officer'))
+    loan=loan_for_lender(db,loan_id,user,'repay')
     if loan.status!='active': raise HTTPException(409,'Loan is not active')
     if db.scalar(select(LoanRepayment.id).where(LoanRepayment.loan_id==loan.id,LoanRepayment.reference==data.reference)) is not None:
         raise HTTPException(409,'Repayment reference already recorded')
@@ -500,7 +539,7 @@ def lender_portfolio(institution_id:int,user:CurrentUser,db:Db):
             'outstanding_fees':0,'due_through_today':0,'overdue_amount':0,'overdue_loans':0}
     for loan in loans:
         disbursed,paid_principal,paid_interest,scheduled_total_interest=sums(db,loan)
-        fees=loan_fee_total(loan) if loan.status!='awaiting_disbursement' else 0
+        fees=loan_fee_total(loan) if loan.status in ('active','repaid') else 0
         fees_paid=db.scalar(select(func.coalesce(func.sum(LoanRepayment.fees_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
         paid=paid_principal+paid_interest+fees_paid
         outstanding_principal=disbursed-paid_principal
@@ -513,7 +552,7 @@ def lender_portfolio(institution_id:int,user:CurrentUser,db:Db):
         cumulative=0
         previous_unpaid=0
         overdue_amount=0
-        if loan.status!='awaiting_disbursement':
+        if loan.status in ('active','repaid'):
             for installment in db.scalars(select(LoanInstallment).where(LoanInstallment.loan_id==loan.id).order_by(LoanInstallment.number)).all():
                 installment_total=installment.principal_pesewas+installment.interest_pesewas+installment.fees_pesewas
                 cumulative+=installment_total
@@ -546,10 +585,15 @@ def lender_portfolio(institution_id:int,user:CurrentUser,db:Db):
 @app.get('/finance/loans/{loan_id}/schedule',tags=TAG)
 def loan_schedule(loan_id:int,user:CurrentUser,db:Db):
     loan=loan_for_view(db,loan_id,user)
+    rows = db.scalars(select(LoanInstallment).where(
+        LoanInstallment.loan_id == loan.id,
+    ).order_by(LoanInstallment.number)).all()
+    if not rows and loan.status in ('offered', 'awaiting_disbursement') and loan.frequency != 'custom':
+        rows = list(standard_installments(loan, loan.approved_pesewas))
     return [{'number':x.number,'due_on':x.due_on,'principal_ghs':ghs(x.principal_pesewas),
              'interest_ghs':ghs(x.interest_pesewas),'fees_ghs':ghs(x.fees_pesewas),
              'total_ghs':ghs(x.principal_pesewas+x.interest_pesewas+x.fees_pesewas)}
-            for x in db.scalars(select(LoanInstallment).where(LoanInstallment.loan_id==loan.id).order_by(LoanInstallment.number)).all()]
+            for x in rows]
 
 @app.get('/finance/loans/{loan_id}/transactions',tags=TAG)
 def loan_transactions(loan_id:int,user:CurrentUser,db:Db):

@@ -1,7 +1,9 @@
-import os
+from io import BytesIO
+from pypdf import PdfReader
 from datetime import date, datetime, timedelta, timezone
 from .test_api import client, upload_loan_video
 from .test_foundation import signup
+from .test_account_access import admin_headers, register_institution
 from app.automated_costing import CycleExpense
 from app.feeding import FeedLedger, FeedProduct
 from app.forecasting import ProductionPlan
@@ -17,16 +19,14 @@ def submit_application(farm_id,payload,headers,evidence_id=None):
 
 def test_lending_consent_roles_and_appraisal():
     farmer=signup('loan-farmer@example.com')
-    lender=signup('loan-lender@example.com')
     officer=signup('loan-officer@example.com')
     reviewer=signup('loan-reviewer@example.com')
     stranger=signup('loan-stranger@example.com')
-    admin=signup('loan-admin@example.com')
-    os.environ['AQUAFARM_PLATFORM_ADMIN_EMAIL']='loan-admin@example.com'
+    admin=admin_headers()
     farm=client.post('/farms',json={'name':'Loan Test Farm','region':'North East','district':'Yunyoo','farm_type':'pond','species':'Tilapia'},headers=farmer)
     assert farm.status_code==201, farm.text
     fid=farm.json()['id']
-    inst=client.post('/finance/institutions',json={'name':'Test Rural Bank','institution_type':'rural_bank','registration_number':'TEST-123'},headers=lender)
+    lender,inst=register_institution('loan-lender@example.com',{'name':'Test Rural Bank','institution_type':'rural_bank','registration_number':'TEST-123'})
     assert inst.status_code==201,inst.text
     iid=inst.json()['id']
     assert inst.json()['status']=='pending'
@@ -71,6 +71,35 @@ def test_lending_consent_roles_and_appraisal():
     assert client.get(f'/finance/institutions/{iid}/applications/{aid}',headers=stranger).status_code==404
     detail=client.get(f'/finance/institutions/{iid}/applications/{aid}',headers=lender)
     assert detail.status_code==200,detail.text
+    reference = response.json()['reference']
+    lookup = f'/finance/institutions/{iid}/application-lookup'
+    assert client.get(lookup, params={'reference': reference}, headers=lender).json()['id'] == aid
+    assert client.get(lookup, params={'reference': reference}, headers=stranger).status_code == 404
+    assert client.get(lookup, params={'reference': 'invalid'}, headers=lender).status_code == 404
+    assert client.get(f'/farms/{fid}/loan-applications/{aid}', headers=farmer).json()['reference'] == reference
+    preview = client.post(f'/farms/{fid}/loan-application-preview', json=payload, headers=farmer)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()['farm']['farm_id'] == fid
+    assert client.post(f'/farms/{fid}/loan-application-preview', json=payload, headers=stranger).status_code == 404
+    farmer_pdf = f'/farms/{fid}/loan-applications/{aid}/report.pdf'
+    lender_pdf = f'/finance/institutions/{iid}/applications/{aid}/report.pdf'
+    for path, headers in ((farmer_pdf, farmer), (lender_pdf, lender)):
+        pdf = client.get(path, headers=headers)
+        assert pdf.status_code == 200, pdf.text
+        assert pdf.content.startswith(b'%PDF-')
+        assert pdf.headers['content-type'] == 'application/pdf'
+        assert pdf.headers['content-disposition'] == f'attachment; filename="{reference}.pdf"'
+        pages = PdfReader(BytesIO(pdf.content)).pages
+        assert len(pages) >= 2
+        extracted = ' '.join(page.extract_text() for page in pages)
+        for expected in (reference, '20,000.00', 'Loan Test Farm', 'loan-farmer@example.com',
+                         'Production history', 'Feed inventory', 'Historical cash flow', 'Not provided'):
+            assert expected in extracted
+        from app.loan_appraisal_pdf import CURRENCY
+        assert CURRENCY + '20,000.00' in extracted
+        assert 'household_expenses_provided' not in extracted
+        assert client.get(path, headers=stranger).status_code == 404
+    assert client.get(lender_pdf.replace(f'/institutions/{iid}/', f'/institutions/{iid+1000}/'), headers=lender).status_code == 404
     snapshot=detail.json()['shared_report_snapshot']
     assert snapshot['application_video_evidence']['duration_seconds']==15
     assert snapshot['application_video_evidence']['device_recorded_at']
@@ -106,13 +135,11 @@ def test_lending_consent_roles_and_appraisal():
 
 def test_loan_appraisal_snapshot_includes_production_cashflow_and_privacy_boundaries():
     farmer=signup('appraisal-data-farmer@example.com')
-    lender=signup('appraisal-data-lender@example.com')
-    admin=signup('appraisal-data-admin@example.com')
-    os.environ['AQUAFARM_PLATFORM_ADMIN_EMAIL']='appraisal-data-admin@example.com'
+    admin=admin_headers()
     farm=client.post('/farms',json={'name':'Appraisal Data Farm','region':'North East','district':'Yunyoo','farm_type':'pond','species':'Tilapia'},headers=farmer)
     assert farm.status_code==201,farm.text
     farm_id=farm.json()['id']
-    institution=client.post('/finance/institutions',json={'name':'Appraisal Data Bank','institution_type':'rural_bank','registration_number':'TEST-APPRAISAL-1'},headers=lender)
+    lender,institution=register_institution('appraisal-data-lender@example.com',{'name':'Appraisal Data Bank','institution_type':'rural_bank','registration_number':'TEST-APPRAISAL-1'})
     assert institution.status_code==201,institution.text
     institution_id=institution.json()['id']
     assert client.post(f'/finance/institutions/{institution_id}/verify',headers=admin).status_code==200

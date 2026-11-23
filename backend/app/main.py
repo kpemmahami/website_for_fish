@@ -9,9 +9,10 @@ import jwt
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
 from pwdlib import PasswordHash
 from sqlalchemy import DateTime, ForeignKey, String, Float, Text, Boolean, create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///./aquafarm.db')
@@ -37,12 +38,12 @@ class User(Base):
     sms_daily_records_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sms_loan_reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    account_type: Mapped[str] = mapped_column(String(20), default='farmer')
     farms: Mapped[list['Farm']] = relationship(back_populates='owner')
 
     @property
     def is_platform_admin(self) -> bool:
-        admin_email = os.getenv('AQUAFARM_PLATFORM_ADMIN_EMAIL', '').strip().lower()
-        return bool(admin_email) and self.email.lower() == admin_email
+        return self.account_type == 'admin'
 
 class Farm(Base):
     __tablename__ = 'farms'
@@ -92,12 +93,21 @@ class AuditLog(Base):
 
 
 class Register(BaseModel):
-    full_name: str = Field(min_length=2, max_length=120)
+    model_config = ConfigDict(extra='forbid')
+    full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
     email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+class FarmerRegister(Register):
+    business_type: Literal['farmer','processor','integrated'] = 'farmer'
+
+
+class AdminRegister(Register):
     password: str = Field(min_length=12, max_length=128)
 
+
 class Login(BaseModel):
-    email: EmailStr
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
     password: str
 
 class Token(BaseModel):
@@ -112,7 +122,9 @@ class UserOut(BaseModel):
     phone_number: str | None
     sms_daily_records_enabled: bool
     sms_loan_reminders_enabled: bool
+    account_type: Literal['legacy', 'farmer', 'institution', 'admin']
     is_platform_admin: bool = False
+    is_platform_owner: bool = False
 
 class ContactUpdate(BaseModel):
     phone_number: str | None = Field(default=None, pattern=r'^\+[1-9]\d{7,14}$')
@@ -233,32 +245,74 @@ app = FastAPI(title='AquaFarm Manager Ghana API', version='0.1.0', lifespan=life
 def health():
     return {'status': 'ok'}
 
+def new_user(data: Register, account_type: str) -> User:
+    return User(full_name=data.full_name, email=str(data.email).lower(),
+                password_hash=password_hash.hash(data.password), account_type=account_type)
+
+
 @app.post('/auth/register', response_model=UserOut, status_code=201)
-def register(data: Register, db: Db):
-    email = str(data.email).lower()
-    if db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(status_code=409, detail='Email already registered')
-    user = User(full_name=data.full_name, email=email, password_hash=password_hash.hash(data.password))
+@app.post('/auth/farmer/register', response_model=UserOut, status_code=201)
+def register(data: FarmerRegister, db: Db):
+    user = new_user(data, 'farmer')
     db.add(user)
     try:
+        if data.business_type != 'farmer':
+            from .processing import ProcessingBusiness
+            db.flush()
+            db.add(ProcessingBusiness(owner_id=user.id,name=data.full_name,business_type=data.business_type))
         db.commit()
-    except Exception:
+    except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail='Unable to register this email')
+        raise HTTPException(status_code=409, detail='Email already registered')
     db.refresh(user)
     return user
 
-@app.post('/auth/login', response_model=Token)
-def login(data: Login, db: Db):
-    user = db.scalar(select(User).where(User.email == str(data.email).lower()))
-    if user is None or not password_hash.verify(data.password, user.password_hash):
+
+def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token:
+    from .development import DEVELOPMENT_ACCOUNTS, enabled, seeded_account
+
+    identifier = data.email.lower()
+    email = DEVELOPMENT_ACCOUNTS.get(identifier, identifier) if enabled(DATABASE_URL) else identifier
+    user = db.scalar(select(User).where(User.email == email))
+    if user is not None and email in DEVELOPMENT_ACCOUNTS.values():
+        if seeded_account(db, user.id) and not enabled(DATABASE_URL):
+            raise HTTPException(status_code=401, detail='Invalid credentials')
+        if identifier in DEVELOPMENT_ACCOUNTS and not seeded_account(db, user.id):
+            raise HTTPException(status_code=401, detail='Invalid credentials')
+    if user is None or user.account_type not in account_types or not password_hash.verify(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid credentials')
     token = jwt.encode({'sub': str(user.id), 'exp': datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES)}, SECRET_KEY, algorithm='HS256')
     return Token(access_token=token)
 
+
+@app.post('/auth/login', response_model=Token)
+@app.post('/auth/farmer/login', response_model=Token)
+def login(data: Login, db: Db):
+    return login_account(data, db, ('farmer', 'legacy'))
+
+
+@app.post('/auth/institution/login', response_model=Token)
+def institution_login(data: Login, db: Db):
+    return login_account(data, db, ('institution', 'legacy'))
+
+
+@app.post('/auth/admin/login', response_model=Token)
+def admin_login(data: Login, db: Db):
+    return login_account(data, db, ('admin',))
+
+
+def require_platform_admin(user: User):
+    if not user.is_platform_admin:
+        raise HTTPException(403, 'Platform administrator access required')
+
+
 @app.get('/auth/me', response_model=UserOut)
-def me(user: CurrentUser):
-    return user
+def me(user: CurrentUser, db: Db):
+    from .administration import is_platform_owner
+
+    return UserOut.model_validate(user).model_copy(update={
+        'is_platform_owner': is_platform_owner(user, db),
+    })
 
 @app.patch('/auth/me', response_model=UserOut)
 def update_contact(data: ContactUpdate, user: CurrentUser, db: Db):
@@ -271,6 +325,8 @@ def update_contact(data: ContactUpdate, user: CurrentUser, db: Db):
 
 @app.post('/farms', response_model=FarmOut, status_code=201)
 def create_farm(data: FarmIn, user: CurrentUser, db: Db):
+    if user.account_type not in ('farmer', 'legacy'):
+        raise HTTPException(403, 'Farmer account required')
     farm = Farm(**data.model_dump(), owner_id=user.id)
     db.add(farm)
     db.flush()
@@ -365,3 +421,21 @@ from . import lending
 from . import loan_servicing
 from . import evidence
 from . import daily_reminders
+
+from . import administration
+
+from . import institution_staff
+
+from . import feeding_sessions
+
+from . import production_alerts
+from . import request_diagnostics
+from . import farm_expenses
+from . import pricing_advisor
+from . import farm_report_views
+
+from . import feed_outlook
+
+from . import activity_history
+
+from . import processing

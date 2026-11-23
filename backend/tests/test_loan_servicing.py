@@ -1,25 +1,23 @@
 """Phase 0009 workflow, access restrictions, duplicate references, and balances."""
-import os
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from .test_api import client, upload_loan_video
 from .test_foundation import signup
+from .test_account_access import admin_headers, register_institution
 from app.loan_servicing import LoanInstallment
 from app.daily_reminders import LoanSmsReminder, deliver_loan_sms_reminders
 from app.main import SessionLocal
 
 def test_loan_servicing_permissions_and_balances():
     farmer=signup('servicing-farmer@example.com')
-    lender=signup('servicing-lender@example.com')
     officer=signup('servicing-officer@example.com')
     reviewer=signup('servicing-reviewer@example.com')
     stranger=signup('servicing-stranger@example.com')
-    admin=signup('servicing-admin@example.com')
-    os.environ['AQUAFARM_PLATFORM_ADMIN_EMAIL']='servicing-admin@example.com'
+    admin=admin_headers()
     farm=client.post('/farms',json={'name':'Servicing Farm','region':'North East','district':'Yunyoo','farm_type':'pond','species':'Tilapia'},headers=farmer)
     assert farm.status_code==201,farm.text
     fid=farm.json()['id']
-    inst=client.post('/finance/institutions',json={'name':'Servicing Rural Bank','institution_type':'rural_bank','registration_number':'TEST-SERV-1'},headers=lender)
+    lender,inst=register_institution('servicing-lender@example.com',{'name':'Servicing Rural Bank','institution_type':'rural_bank','registration_number':'TEST-SERV-1'})
     assert inst.status_code==201,inst.text
     iid=inst.json()['id']
     assert client.post(f'/finance/institutions/{iid}/verify',headers=admin).status_code==200
@@ -41,12 +39,19 @@ def test_loan_servicing_permissions_and_balances():
     opened=client.post(f'/finance/institutions/{iid}/loans',json=opening,headers=reviewer)
     assert opened.status_code==201,opened.text
     loan_id=opened.json()['id']
-    assert opened.json()['status']=='awaiting_disbursement'
+    assert opened.json()['status']=='offered'
     assert client.post(f'/finance/institutions/{iid}/loans',json=opening,headers=lender).status_code==409
     today=date.today().isoformat()
     first={'amount_ghs':'4000.00','reference':'BANK-TRX-1','transaction_date':today,'evidence_id':1}
     assert client.post(f'/finance/loans/{loan_id}/disbursements',json=first,headers=stranger).status_code==404
     assert client.post(f'/finance/loans/{loan_id}/disbursements',json=first,headers=reviewer).status_code==404
+    offer_path = f'/finance/loans/{loan_id}/offer-response'
+    assert client.post(f'/finance/loans/{loan_id}/disbursements', json=first, headers=officer).status_code == 409
+    assert client.post(offer_path, json={'decision': 'accept'}, headers=officer).status_code == 404
+    schedule = client.get(f'/finance/loans/{loan_id}/schedule', headers=farmer)
+    assert len(schedule.json()) == 12
+    assert client.post(offer_path, json={'decision': 'accept'}, headers=farmer).json()['status'] == 'awaiting_disbursement'
+    assert client.post(offer_path, json={'decision': 'accept'}, headers=farmer).status_code == 409
     first['evidence_id']=upload_loan_video(officer,fid,'disbursement',loan_id)
     assert client.get(f"/finance/loan-evidence/{first['evidence_id']}/video",headers=farmer).status_code==200
     assert client.get(f"/finance/loan-evidence/{first['evidence_id']}/video",headers=stranger).status_code==404
@@ -105,13 +110,11 @@ def test_loan_servicing_permissions_and_balances():
 
 def test_custom_schedule_reminders_and_portfolio_metrics():
     farmer=signup('custom-schedule-farmer@example.com')
-    lender=signup('custom-schedule-lender@example.com')
-    admin=signup('custom-schedule-admin@example.com')
-    os.environ['AQUAFARM_PLATFORM_ADMIN_EMAIL']='custom-schedule-admin@example.com'
+    admin=admin_headers()
     farm=client.post('/farms',json={'name':'Custom Schedule Farm','region':'North East','district':'Yunyoo','farm_type':'pond','species':'Tilapia'},headers=farmer)
     assert farm.status_code==201,farm.text
     farm_id=farm.json()['id']
-    institution=client.post('/finance/institutions',json={'name':'Custom Schedule Bank','institution_type':'rural_bank','registration_number':'TEST-CUSTOM-1'},headers=lender)
+    lender,institution=register_institution('custom-schedule-lender@example.com',{'name':'Custom Schedule Bank','institution_type':'rural_bank','registration_number':'TEST-CUSTOM-1'})
     assert institution.status_code==201,institution.text
     institution_id=institution.json()['id']
     assert client.post(f'/finance/institutions/{institution_id}/verify',headers=admin).status_code==200
@@ -128,7 +131,8 @@ def test_custom_schedule_reminders_and_portfolio_metrics():
         {'due_on':(first_due+timedelta(days=90)).isoformat(),'principal_ghs':'3000.00','interest_ghs':'360.00','fees_ghs':'25.00'},
         {'due_on':(first_due+timedelta(days=180)).isoformat(),'principal_ghs':'2000.00','interest_ghs':'240.00','fees_ghs':'25.00'},
     ]
-    opening={'application_id':application_id,'annual_flat_interest_percent':'12.00','repayment_frequency':'custom','first_due_date':first_due.isoformat(),'custom_schedule':schedule}
+    opening={'application_id':application_id,'annual_flat_interest_percent':'12.00',
+             'insurance_fee_percent':'0.75','processing_fee_percent':'0.25','repayment_frequency':'custom','first_due_date':first_due.isoformat(),'custom_schedule':schedule}
     bad_schedule=[dict(item) for item in schedule]
     bad_schedule[0]['principal_ghs']='4999.00'
     invalid=client.post(f'/finance/institutions/{institution_id}/loans',json={**opening,'custom_schedule':bad_schedule},headers=lender)
@@ -139,8 +143,12 @@ def test_custom_schedule_reminders_and_portfolio_metrics():
     loan_id=opened.json()['id']
     assert opened.json()['repayment_frequency']=='custom'
     assert opened.json()['scheduled_interest_ghs']==0
-    assert opened.json()['insurance_fee_ghs']==100
+    assert opened.json()['insurance_fee_percent']==0.75
+    assert opened.json()['insurance_fee_ghs']==75
+    assert opened.json()['processing_fee_percent']==0.25
+    assert opened.json()['processing_fee_ghs']==25
     assert opened.json()['total_contract_repayment_ghs']==11300
+    assert client.post(f'/finance/loans/{loan_id}/offer-response', json={'decision':'accept'}, headers=farmer).status_code == 200
     disbursement_video=upload_loan_video(lender,farm_id,'disbursement',loan_id)
     assert client.post(f'/finance/loans/{loan_id}/disbursements',json={'amount_ghs':'10000.00','reference':'CUSTOM-DISB-1','transaction_date':date.today().isoformat(),'evidence_id':disbursement_video},headers=lender).status_code==201
     assert client.get(f'/finance/loans/{loan_id}',headers=farmer).json()['scheduled_interest_ghs']==1200

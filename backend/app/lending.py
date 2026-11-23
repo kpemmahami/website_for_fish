@@ -1,13 +1,15 @@
 """Phase 0008: consent-based loan applications and institution appraisal (no money movement)."""
-import os
+import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, select, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, select, func, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
-from .main import Base, app, Db, CurrentUser, User, Farm, owned_farm, audit
+from .main import Base, app, Db, CurrentUser, User, Farm, owned_farm, audit, Register, new_user, require_platform_admin
 from .dashboard import build_dashboard
 
 
@@ -33,6 +35,9 @@ class InstitutionMember(Base):
     institution_id: Mapped[int] = mapped_column(ForeignKey('finance_institutions.id'), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default='active', server_default='active')
+    department: Mapped[str | None] = mapped_column(String(120))
+    job_title: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 class LoanApplication(Base):
@@ -77,15 +82,18 @@ class MemberIn(BaseModel):
     user_email: str = Field(min_length=3, max_length=255)
     role: Literal['officer','reviewer']
 
-class ApplicationIn(BaseModel):
+class ApplicationPreviewIn(BaseModel):
     institution_id: int = Field(gt=0)
     requested_ghs: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     term_months: int = Field(ge=1, le=240)
     purpose: str = Field(min_length=10, max_length=1000)
-    evidence_id: int = Field(gt=0)
     monthly_other_income_ghs: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
     monthly_household_expenses_ghs: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
     monthly_external_debt_ghs: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
+
+
+class ApplicationIn(ApplicationPreviewIn):
+    evidence_id: int = Field(gt=0)
     share_report: bool = Field(description='Farmer explicitly authorizes sharing the application appraisal snapshot with this institution.')
 
 class DecisionIn(BaseModel):
@@ -94,11 +102,21 @@ class DecisionIn(BaseModel):
     approved_ghs: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=2)
 
 
-def member(db, institution_id, user_id, roles=('owner','officer','reviewer')):
+PERMISSION_ROLES = {
+    'view': ('owner', 'officer', 'reviewer', 'loan_officer', 'credit_manager', 'disbursement', 'collections', 'viewer'),
+    'manage_staff': ('owner',),
+    'assess': ('owner', 'reviewer', 'credit_manager', 'loan_officer'),
+    'appraise': ('owner', 'reviewer', 'credit_manager'),
+    'disburse': ('owner', 'officer', 'disbursement'),
+    'repay': ('owner', 'officer', 'collections'),
+}
+
+
+def member(db, institution_id, user_id, permission='view'):
     institution = db.get(Institution, institution_id)
     if institution is None or institution.status != 'verified':
         raise HTTPException(404, 'Verified institution not found')
-    membership = db.scalar(select(InstitutionMember).where(InstitutionMember.institution_id == institution_id, InstitutionMember.user_id == user_id, InstitutionMember.role.in_(roles)))
+    membership = db.scalar(select(InstitutionMember).where(InstitutionMember.institution_id == institution_id, InstitutionMember.user_id == user_id, InstitutionMember.status == "active", InstitutionMember.role.in_(PERMISSION_ROLES[permission])))
     if membership is None: raise HTTPException(404, 'Institution not found or access denied')
     return institution
 
@@ -109,9 +127,13 @@ def institution_view(x):
             'registration_number':account_number,'account_number':account_number,'status':x.status}
 
 
+def application_reference(application):
+    return f'AQUA-LOAN-{application.created_at.year:04d}-{application.id:06d}'
+
+
 def application_view(x, include_report=False):
     import json
-    result={'id':x.id,'farm_id':x.farm_id,'institution_id':x.institution_id,'requested_ghs':ghs(x.requested_pesewas),'term_months':x.term_months,'purpose':x.purpose,'status':x.status,'created_at':x.created_at}
+    result={'id':x.id,'reference':application_reference(x),'farm_id':x.farm_id,'institution_id':x.institution_id,'requested_ghs':ghs(x.requested_pesewas),'term_months':x.term_months,'purpose':x.purpose,'status':x.status,'created_at':x.created_at}
     if include_report: result['shared_report_snapshot']=json.loads(x.report_snapshot_json)
     return result
 
@@ -158,6 +180,9 @@ def build_appraisal_snapshot(farm_id, user, db, data):
             'species': cycle.species,
             'status': 'closed' if cycle.closed_at else 'active',
             'stocked_on': cycle.stocked_on,
+            'planned_harvest_on': cycle.expected_harvest_on,
+            'target_harvest_weight_g': cycle.target_harvest_weight_g,
+            'expected_survival_pct': cycle.expected_survival_pct,
             'fingerlings_stocked': current.stocked_count,
             'initial_average_weight_g': cycle.initial_average_weight_g,
             'estimated_live_fish': current.estimated_live_count,
@@ -277,6 +302,18 @@ def build_appraisal_snapshot(farm_id, user, db, data):
         if key in monthly_cashflow:
             monthly_cashflow[key]['recorded_operating_expenses_ghs'] += allocation.amount_ghs
             recent_transaction_count += 1
+    from .farm_expenses import ExpensePayment, FarmExpense
+    for expense in db.scalars(select(FarmExpense).where(
+        FarmExpense.farm_id == farm_id, FarmExpense.classification == 'operating',
+    )):
+        expense_categories[expense.category] += ghs(expense.amount_pesewas)
+    for payment in db.scalars(select(ExpensePayment).join(FarmExpense).where(
+        FarmExpense.farm_id == farm_id, FarmExpense.classification == 'operating',
+    )):
+        key = payment.paid_on.strftime('%Y-%m')
+        if key in monthly_cashflow:
+            monthly_cashflow[key]['recorded_operating_expenses_ghs'] += ghs(payment.amount_pesewas)
+            recent_transaction_count += 1
     for month in monthly_cashflow.values():
         month['net_recorded_operating_cashflow_ghs'] = round(
             month['sales_payments_received_ghs']
@@ -370,8 +407,10 @@ def build_appraisal_snapshot(farm_id, user, db, data):
             'projected_net_cashflow_after_obligations_ghs': projected_net,
         })
 
-    application_video = db.get(LoanEvidence, data.evidence_id)
+    evidence_id = getattr(data, "evidence_id", None)
+    application_video = db.get(LoanEvidence, evidence_id) if evidence_id is not None else None
     return {
+        'generated_at': now().isoformat(),
         'farmer': {'user_id': user.id, 'full_name': user.full_name, 'email': user.email},
         'farm': {'farm_id': farm.id, 'name': farm.name, 'region': farm.region, 'district': farm.district,
                  'farm_type': farm.farm_type, 'species': farm.species},
@@ -426,8 +465,8 @@ def build_appraisal_snapshot(farm_id, user, db, data):
             'sales_count': len(sales),
             'recent_cashflow_transaction_count': recent_transaction_count,
         },
-        'application_video_media_type': application_video.media_type,
-        'application_video_evidence': loan_evidence_view(application_video),
+        'application_video_media_type': application_video.media_type if application_video else None,
+        'application_video_evidence': loan_evidence_view(application_video) if application_video else None,
         'warnings': report['warnings'] + [
             'Production estimates, farmer-declared figures, and recorded transactions are not independently verified.',
             'No farm GPS coordinates or customer identities are included in this lender snapshot.',
@@ -436,29 +475,51 @@ def build_appraisal_snapshot(farm_id, user, db, data):
     }
 
 
-@app.post('/finance/institutions', status_code=201, tags=['Financial institutions and loan appraisal'])
-def create_institution(data: InstitutionIn, user: CurrentUser, db: Db):
+class InstitutionRegistration(Register):
+    institution: InstitutionIn
+
+
+def add_institution(data, user, db):
     institution=Institution(**data.model_dump(),owner_user_id=user.id,status='pending')
     db.add(institution); db.flush()
     db.add(InstitutionMember(institution_id=institution.id,user_id=user.id,role='owner'))
-    audit(db,user,'create','finance_institution',institution.id); db.commit(); db.refresh(institution)
+    audit(db,user,'create','finance_institution',institution.id)
+    return institution
+
+
+@app.post('/finance/institutions', status_code=201, tags=['Financial institutions and loan appraisal'])
+def create_institution(data: InstitutionIn, user: CurrentUser, db: Db):
+    if user.account_type not in ('legacy', 'institution'):
+        raise HTTPException(403, 'Institution account required')
+    institution = add_institution(data, user, db)
+    db.commit()
+    return institution_view(institution)
+
+
+@app.post('/auth/institution/register', status_code=201)
+def register_institution(data: InstitutionRegistration, db: Db):
+    user = new_user(data, 'institution')
+    db.add(user)
+    try:
+        db.flush()
+        institution = add_institution(data.institution, user, db)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'Email already registered')
     return institution_view(institution)
 
 @app.get('/finance/institutions', tags=['Financial institutions and loan appraisal'])
 def verified_institutions(user: CurrentUser, db: Db):
-    return [institution_view(x) for x in db.scalars(select(Institution).where(Institution.status=='verified').order_by(Institution.name)).all()]
+    return [{'id': x.id, 'name': x.name, 'institution_type': x.institution_type, 'status': x.status}
+            for x in db.scalars(select(Institution).where(Institution.status=='verified').order_by(Institution.name))]
 
 @app.get('/finance/institutions/mine', tags=['Financial institutions and loan appraisal'])
 def my_institutions(user: CurrentUser, db: Db):
-    memberships=db.scalars(select(InstitutionMember).where(InstitutionMember.user_id==user.id)).all()
+    memberships=db.scalars(select(InstitutionMember).where(InstitutionMember.user_id==user.id, InstitutionMember.status=="active")).all()
     roles={membership.institution_id:membership.role for membership in memberships}
     institutions=db.scalars(select(Institution).where(Institution.id.in_(roles)).order_by(Institution.id)).all()
     return [{**institution_view(institution),'role':roles[institution.id]} for institution in institutions]
-
-def require_platform_admin(user: CurrentUser):
-    admin_email=os.getenv('AQUAFARM_PLATFORM_ADMIN_EMAIL','').strip().lower()
-    if not admin_email or user.email.lower()!=admin_email:
-        raise HTTPException(403,'Platform administrator access required')
 
 @app.get('/finance/admin/institutions/pending', tags=['Financial institutions and loan appraisal'])
 def pending_institutions(user: CurrentUser, db: Db):
@@ -466,28 +527,85 @@ def pending_institutions(user: CurrentUser, db: Db):
     institutions=db.scalars(select(Institution).where(Institution.status=='pending').order_by(Institution.created_at)).all()
     return [institution_view(x) for x in institutions]
 
+class RejectionIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000, pattern=r'\S')
+
+
+def decide_institution(institution_id, status, user, db, reason=None):
+    require_platform_admin(user)
+    institution = db.get(Institution, institution_id)
+    if institution is None:
+        raise HTTPException(404, 'Institution not found')
+    result = db.execute(update(Institution).where(
+        Institution.id == institution_id, Institution.status == 'pending',
+    ).values(status=status))
+    if result.rowcount != 1:
+        raise HTTPException(409, 'Institution already reviewed')
+    audit(db, user, 'verify' if status == 'verified' else 'reject',
+          'finance_institution', institution_id, json.dumps({'reason': reason}) if reason else '{}')
+    db.commit()
+    return institution_view(institution)
+
+
 @app.post('/finance/institutions/{institution_id}/verify', tags=['Financial institutions and loan appraisal'])
 def verify_institution(institution_id: int, user: CurrentUser, db: Db):
-    # Separate, configured platform administrator; registration never grants verification.
-    admin_email=os.getenv('AQUAFARM_PLATFORM_ADMIN_EMAIL','').strip().lower()
-    if not admin_email or user.email.lower()!=admin_email:
-        raise HTTPException(403,'Platform administrator access required')
-    inst=db.get(Institution,institution_id)
-    if inst is None: raise HTTPException(404,'Institution not found')
-    inst.status='verified'; audit(db,user,'verify','finance_institution',inst.id); db.commit()
-    return institution_view(inst)
+    return decide_institution(institution_id, 'verified', user, db)
+
 
 @app.post('/finance/institutions/{institution_id}/reject', tags=['Financial institutions and loan appraisal'])
-def reject_institution(institution_id: int, user: CurrentUser, db: Db):
+def reject_institution(institution_id: int, data: RejectionIn, user: CurrentUser, db: Db):
+    return decide_institution(institution_id, 'rejected', user, db, data.reason.strip())
+
+
+InstitutionStatus = Literal['pending', 'under_review', 'more_info_required', 'verified', 'rejected', 'suspended']
+INSTITUTION_TRANSITIONS = {
+    'pending': {'under_review', 'more_info_required', 'verified', 'rejected'},
+    'under_review': {'more_info_required', 'verified', 'rejected'},
+    'more_info_required': {'under_review', 'verified', 'rejected'},
+    'verified': {'suspended'},
+    'suspended': {'verified'},
+}
+
+
+class InstitutionStatusIn(RejectionIn):
+    status: InstitutionStatus
+
+
+@app.get('/finance/admin/institutions', tags=['Financial institutions and loan appraisal'])
+def list_institution_reviews(user: CurrentUser, db: Db):
     require_platform_admin(user)
-    inst=db.get(Institution,institution_id)
-    if inst is None: raise HTTPException(404,'Institution not found')
-    inst.status='rejected'; audit(db,user,'reject','finance_institution',inst.id); db.commit()
-    return institution_view(inst)
+    return [institution_view(row) for row in db.scalars(
+        select(Institution).order_by(Institution.created_at.desc(), Institution.id.desc())
+    )]
+
+
+@app.post('/finance/admin/institutions/{institution_id}/status', tags=['Financial institutions and loan appraisal'])
+def update_institution_status(institution_id: int, data: InstitutionStatusIn, user: CurrentUser, db: Db):
+    require_platform_admin(user)
+    institution = db.get(Institution, institution_id)
+    if institution is None:
+        raise HTTPException(404, 'Institution not found')
+    previous = institution.status
+    if previous == 'suspended' or data.status == 'suspended':
+        from .administration import require_platform_owner
+        require_platform_owner(user, db)
+    if data.status not in INSTITUTION_TRANSITIONS.get(previous, set()):
+        raise HTTPException(409, 'This status change is unavailable')
+    changed = db.execute(update(Institution).where(
+        Institution.id == institution_id, Institution.status == previous,
+    ).values(status=data.status))
+    if changed.rowcount != 1:
+        raise HTTPException(409, 'Institution status changed during review')
+    audit(db, user, 'change_status', 'finance_institution', institution_id, json.dumps({
+        'previous_status': previous, 'status': data.status, 'reason': data.reason.strip(),
+    }))
+    db.commit()
+    return institution_view(institution)
+
 
 @app.post('/finance/institutions/{institution_id}/members', tags=['Financial institutions and loan appraisal'])
 def add_member(institution_id: int, data: MemberIn, user: CurrentUser, db: Db):
-    member(db,institution_id,user.id,('owner',))
+    member(db,institution_id,user.id,'manage_staff')
     target=db.scalar(select(User).where(func.lower(User.email)==data.user_email.lower()))
     if target is None: raise HTTPException(404,'User not found; user must register first')
     existing=db.scalar(select(InstitutionMember).where(InstitutionMember.institution_id==institution_id,InstitutionMember.user_id==target.id))
@@ -495,6 +613,15 @@ def add_member(institution_id: int, data: MemberIn, user: CurrentUser, db: Db):
     db.add(InstitutionMember(institution_id=institution_id,user_id=target.id,role=data.role))
     audit(db,user,'add_member','finance_institution',institution_id); db.commit()
     return {'institution_id':institution_id,'user_id':target.id,'role':data.role}
+
+@app.post('/farms/{farm_id}/loan-application-preview', tags=['Financial institutions and loan appraisal'])
+def preview_application(farm_id: int, data: ApplicationPreviewIn, user: CurrentUser, db: Db):
+    owned_farm(farm_id, user, db)
+    institution = db.get(Institution, data.institution_id)
+    if institution is None or institution.status != 'verified':
+        raise HTTPException(404, 'Verified institution not found')
+    return build_appraisal_snapshot(farm_id, user, db, data)
+
 
 @app.post('/farms/{farm_id}/loan-applications', status_code=201, tags=['Financial institutions and loan appraisal'])
 def submit_application(farm_id:int,data:ApplicationIn,user:CurrentUser,db:Db):
@@ -508,6 +635,11 @@ def submit_application(farm_id:int,data:ApplicationIn,user:CurrentUser,db:Db):
     evidence=required_loan_evidence(db,data.evidence_id,farm_id,'loan_application',user.id)
     safe=build_appraisal_snapshot(farm_id,user,db,data)
     safe['application_video_evidence_id']=evidence.id
+    safe['consent'] = {
+        'institution_id': inst.id, 'institution_name': inst.name,
+        'purpose': 'Loan appraisal', 'granted_at': now().isoformat(),
+        'categories': ['Farmer identity', 'Farm production and finance', 'Disclosed obligations', 'Application evidence'],
+    }
     obj=LoanApplication(farm_id=farm_id,institution_id=inst.id,requested_pesewas=pesewas(data.requested_ghs),term_months=data.term_months,purpose=data.purpose,status='submitted',report_snapshot_json=json.dumps(safe,default=str))
     db.add(obj); db.flush()
     evidence.application_id=obj.id
@@ -532,13 +664,98 @@ def lender_application(institution_id:int,application_id:int,user:CurrentUser,db
     member(db,institution_id,user.id)
     obj=db.scalar(select(LoanApplication).where(LoanApplication.id==application_id,LoanApplication.institution_id==institution_id))
     if obj is None: raise HTTPException(404,'Application not found')
-    result=application_view(obj,True)
-    result['appraisals']=[{'decision':d.decision,'rationale':d.rationale,'approved_ghs':ghs(d.approved_pesewas) if d.approved_pesewas is not None else None,'created_at':d.created_at} for d in db.scalars(select(LoanDecision).where(LoanDecision.application_id==obj.id).order_by(LoanDecision.id)).all()]
+    return review_application(obj, user, db)
+
+
+def application_details(application, db):
+    result = application_view(application, True)
+    decisions = db.scalars(select(LoanDecision).where(
+        LoanDecision.application_id == application.id,
+    ).order_by(LoanDecision.id))
+    result['appraisals'] = [
+        {'decision': decision.decision, 'rationale': decision.rationale,
+         'approved_ghs': ghs(decision.approved_pesewas) if decision.approved_pesewas is not None else None,
+         'created_at': decision.created_at}
+        for decision in decisions
+    ]
     return result
+
+
+def review_application(application, user, db):
+    result = application_details(application, db)
+    audit(db, user, 'view_shared_report', 'loan_application', application.id)
+    db.commit()
+    return result
+
+
+@app.get('/farms/{farm_id}/loan-applications/{application_id}', tags=['Financial institutions and loan appraisal'])
+def farmer_application(farm_id: int, application_id: int, user: CurrentUser, db: Db):
+    owned_farm(farm_id, user, db)
+    application = db.scalar(select(LoanApplication).where(
+        LoanApplication.id == application_id, LoanApplication.farm_id == farm_id,
+    ))
+    if application is None:
+        raise HTTPException(404, 'Application not found')
+    return application_details(application, db)
+
+
+def application_pdf_response(application, institution_name):
+    from .loan_appraisal_pdf import build_appraisal_pdf
+
+    metadata = application_view(application)
+    content = build_appraisal_pdf(metadata, json.loads(application.report_snapshot_json), institution_name)
+    return Response(content, media_type='application/pdf', headers={
+        'Content-Disposition': f'attachment; filename="{metadata["reference"]}.pdf"',
+        'Cache-Control': 'private, no-store',
+    })
+
+
+@app.get('/farms/{farm_id}/loan-applications/{application_id}/report.pdf', tags=['Financial institutions and loan appraisal'])
+def farmer_application_pdf(farm_id: int, application_id: int, user: CurrentUser, db: Db):
+    owned_farm(farm_id, user, db)
+    application = db.scalar(select(LoanApplication).where(
+        LoanApplication.id == application_id, LoanApplication.farm_id == farm_id,
+    ))
+    if application is None:
+        raise HTTPException(404, 'Application not found')
+    institution = db.get(Institution, application.institution_id)
+    response = application_pdf_response(application, institution.name if institution else None)
+    audit(db, user, 'download_appraisal_pdf', 'loan_application', application.id)
+    db.commit()
+    return response
+
+
+@app.get('/finance/institutions/{institution_id}/applications/{application_id}/report.pdf', tags=['Financial institutions and loan appraisal'])
+def lender_application_pdf(institution_id: int, application_id: int, user: CurrentUser, db: Db):
+    institution = member(db, institution_id, user.id)
+    application = db.scalar(select(LoanApplication).where(
+        LoanApplication.id == application_id, LoanApplication.institution_id == institution_id,
+    ))
+    if application is None:
+        raise HTTPException(404, 'Application not found')
+    response = application_pdf_response(application, institution.name)
+    audit(db, user, 'download_appraisal_pdf', 'loan_application', application.id)
+    db.commit()
+    return response
+
+
+@app.get('/finance/institutions/{institution_id}/application-lookup', tags=['Financial institutions and loan appraisal'])
+def find_application(institution_id: int, reference: str, user: CurrentUser, db: Db):
+    member(db, institution_id, user.id)
+    value = reference.strip().upper()
+    match = re.fullmatch(r'AQUA-LOAN-[0-9]{4}-([0-9]{6,18})', value)
+    if match is None:
+        raise HTTPException(404, 'Application not found')
+    application = db.scalar(select(LoanApplication).where(
+        LoanApplication.id == int(match[1]), LoanApplication.institution_id == institution_id,
+    ))
+    if application is None or application_reference(application) != value:
+        raise HTTPException(404, 'Application not found')
+    return review_application(application, user, db)
 
 @app.post('/finance/institutions/{institution_id}/applications/{application_id}/appraise', tags=['Financial institutions and loan appraisal'])
 def appraise(institution_id:int,application_id:int,data:DecisionIn,user:CurrentUser,db:Db):
-    member(db,institution_id,user.id,('owner','reviewer'))
+    member(db,institution_id,user.id,'appraise' if data.decision in ('approved','rejected') else 'assess')
     obj=db.scalar(select(LoanApplication).where(LoanApplication.id==application_id,LoanApplication.institution_id==institution_id))
     if obj is None: raise HTTPException(404,'Application not found')
     if obj.status in ('approved','rejected'): raise HTTPException(409,'Final decision already recorded')
@@ -546,7 +763,11 @@ def appraise(institution_id:int,application_id:int,data:DecisionIn,user:CurrentU
     if data.decision!='approved' and data.approved_ghs is not None: raise HTTPException(422,'Approved amount only valid for approval')
     if data.approved_ghs is not None and pesewas(data.approved_ghs)>obj.requested_pesewas:
         raise HTTPException(422,'Approved amount cannot exceed the requested amount')
-    obj.status=data.decision; obj.updated_at=now()
+    changed = db.execute(update(LoanApplication).where(
+        LoanApplication.id == obj.id, LoanApplication.status == obj.status,
+    ).values(status=data.decision, updated_at=now()))
+    if changed.rowcount != 1:
+        raise HTTPException(409, 'Application status changed during review')
     db.add(LoanDecision(application_id=obj.id,reviewer_user_id=user.id,decision=data.decision,rationale=data.rationale,approved_pesewas=pesewas(data.approved_ghs) if data.approved_ghs is not None else None))
     audit(db,user,'appraise','loan_application',obj.id); db.commit()
     return {'application_id':obj.id,'status':obj.status,'approved_ghs':float(data.approved_ghs) if data.approved_ghs is not None else None}

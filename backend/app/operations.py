@@ -1,4 +1,5 @@
 """Phase One aquaculture operations. Import after the foundation's models/routes."""
+from calendar import monthrange
 from datetime import date, datetime, timezone
 from typing import Annotated, Literal
 import json
@@ -22,6 +23,10 @@ class StockingCycle(Base):
     initial_average_weight_g: Mapped[float] = mapped_column(Float)
     fingerling_supplier: Mapped[str | None] = mapped_column(String(200), nullable=True)
     stocked_on: Mapped[date] = mapped_column(Date)
+    harvest_duration_months: Mapped[int | None] = mapped_column(Integer)
+    expected_harvest_on: Mapped[date | None] = mapped_column(Date)
+    target_harvest_weight_g: Mapped[float | None] = mapped_column(Float)
+    expected_survival_pct: Mapped[float | None] = mapped_column(Float)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -116,7 +121,35 @@ class FarmSupervisor(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
-class CycleIn(BaseModel):
+def add_calendar_months(day: date, months: int) -> date:
+    year, month_index = divmod(day.year * 12 + day.month - 1 + months, 12)
+    month = month_index + 1
+    return date(year, month, min(day.day, monthrange(year, month)[1]))
+
+
+class HarvestPlanIn(BaseModel):
+    harvest_duration_months: int | None = Field(default=None, ge=1, le=120)
+    expected_harvest_on: date | None = None
+    target_harvest_weight_g: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    expected_survival_pct: float | None = Field(default=None, ge=0, le=100)
+
+    def harvest_date(self, stocked_on: date) -> date | None:
+        expected = self.expected_harvest_on
+        if expected is None and self.harvest_duration_months is not None:
+            try:
+                expected = add_calendar_months(stocked_on, self.harvest_duration_months)
+            except ValueError as exc:
+                raise HTTPException(422, 'Harvest date is out of range') from exc
+        if expected is not None and expected <= stocked_on:
+            raise HTTPException(422, 'Expected harvest date must be after stocking')
+        return expected
+
+
+class HarvestPlanUpdate(HarvestPlanIn):
+    reason: str = Field(min_length=1, max_length=500, pattern=r'\S')
+
+
+class CycleIn(HarvestPlanIn):
     species: str = Field(min_length=2, max_length=100)
     stocked_count: int = Field(gt=0)
     initial_average_weight_g: float = Field(gt=0)
@@ -134,7 +167,7 @@ class CycleOut(CycleIn):
 
 
 class MortalityIn(BaseModel):
-    dead_count: int = Field(gt=0)
+    dead_count: int = Field(ge=0)
     observed_on: date
     cause: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=2000)
@@ -265,6 +298,64 @@ def population(cycle: StockingCycle, db: Session):
                          latest_sampled_on=latest.sampled_on if latest else None)
 
 
+@app.get('/harvest-schedule', tags=['Aquaculture operations'])
+def harvest_schedule(user: CurrentUser, db: Db, warning_days: int = Query(default=30, ge=0, le=365)):
+    from .sales import HarvestLot
+
+    actuals = select(
+        HarvestLot.cycle_id.label('cycle_id'),
+        func.max(HarvestLot.harvested_on).label('last_harvest_on'),
+        func.sum(HarvestLot.quantity_kg).label('harvested_kg'),
+    ).group_by(HarvestLot.cycle_id).subquery()
+    cycles = db.execute(
+        select(StockingCycle, ProductionUnit, Farm, actuals.c.last_harvest_on, actuals.c.harvested_kg)
+        .join(ProductionUnit, ProductionUnit.id == StockingCycle.unit_id)
+        .join(Farm, Farm.id == ProductionUnit.farm_id)
+        .outerjoin(actuals, actuals.c.cycle_id == StockingCycle.id)
+        .where(Farm.owner_id == user.id, Farm.archived_at.is_(None))
+        .order_by(StockingCycle.expected_harvest_on.asc().nulls_last(), StockingCycle.id)
+    )
+    today = date.today()
+    result = []
+    for cycle, unit, farm, last_harvest, harvested_kg in cycles:
+        expected = cycle.expected_harvest_on
+        days_remaining = (expected - today).days if expected else None
+        if cycle.closed_at is not None:
+            status = 'Completed'
+        elif last_harvest is not None:
+            status = 'Partially harvested'
+        elif days_remaining is None:
+            status = 'Not scheduled'
+        elif days_remaining < 0:
+            status = 'Harvest overdue'
+        elif days_remaining == 0:
+            status = 'Harvest due'
+        elif days_remaining <= warning_days:
+            status = 'Harvest approaching'
+        else:
+            status = 'Growing'
+        projected_count = None
+        if expected and cycle.closed_at is None:
+            counts = population(cycle, db)
+            projected_count = max(0, counts.estimated_live_count)
+            if cycle.expected_survival_pct is not None:
+                assumed_total = int(cycle.stocked_count * cycle.expected_survival_pct / 100)
+                projected_count = min(projected_count, max(0, assumed_total - counts.total_harvested))
+        result.append({
+            'cycle_id': cycle.id, 'farm_id': farm.id, 'farm_name': farm.name,
+            'unit_id': unit.id, 'unit_name': unit.name, 'species': cycle.species,
+            'stocked_on': cycle.stocked_on, 'expected_harvest_on': expected,
+            'days_remaining': days_remaining, 'status': status,
+            'target_harvest_weight_g': cycle.target_harvest_weight_g,
+            'expected_survival_pct': cycle.expected_survival_pct,
+            'estimated_harvest_count': projected_count,
+            'estimated_harvest_kg': round(projected_count * cycle.target_harvest_weight_g / 1000, 4)
+            if projected_count is not None and cycle.target_harvest_weight_g is not None else None,
+            'last_harvest_on': last_harvest, 'actual_harvest_kg': harvested_kg,
+        })
+    return result
+
+
 @app.post('/farms/{farm_id}/units/{unit_id}/cycles', response_model=CycleOut, status_code=201, tags=['Aquaculture operations'])
 def create_cycle(
     farm_id: int,
@@ -275,12 +366,18 @@ def create_cycle(
     evidence_id: int = Query(gt=0),
 ):
     owned_unit(farm_id, unit_id, user, db)
+    from .production_alerts import unit_readiness
+
+    if unit_readiness(db, [unit_id]).get(unit_id, {}).get('status', 'ready') != 'ready':
+        raise HTTPException(409, 'Mark this unit ready before recording stocking')
     if data.stocked_on > date.today():
         raise HTTPException(422, 'Stocking date cannot be in the future')
     active = db.scalar(select(StockingCycle.id).where(StockingCycle.unit_id == unit_id, StockingCycle.closed_at.is_(None)))
     if active is not None:
         raise HTTPException(409, 'Unit already has an open stocking cycle')
-    cycle = StockingCycle(unit_id=unit_id, **data.model_dump())
+    values = data.model_dump()
+    values['expected_harvest_on'] = data.harvest_date(data.stocked_on)
+    cycle = StockingCycle(unit_id=unit_id, **values)
     db.add(cycle); db.flush()
     from .evidence import attach_record_evidence
     attach_record_evidence(db, evidence_id, farm_id, unit_id, cycle.id, 'stocking', cycle.id, user)
@@ -293,6 +390,28 @@ def create_cycle(
 def list_cycles(farm_id: int, unit_id: int, user: CurrentUser, db: Db):
     owned_unit(farm_id, unit_id, user, db)
     return db.scalars(select(StockingCycle).where(StockingCycle.unit_id == unit_id).order_by(StockingCycle.id)).all()
+
+
+@app.put('/farms/{farm_id}/units/{unit_id}/cycles/{cycle_id}/harvest-plan', response_model=CycleOut, tags=['Aquaculture operations'])
+def update_harvest_plan(farm_id: int, unit_id: int, cycle_id: int, data: HarvestPlanUpdate, user: CurrentUser, db: Db):
+    cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
+    if cycle.closed_at is not None:
+        raise HTTPException(409, 'Cycle already closed')
+    previous = cycle.expected_harvest_on
+    changes = data.model_dump(exclude_unset=True, exclude={'reason'})
+    if 'expected_harvest_on' in changes or 'harvest_duration_months' in changes:
+        changes['expected_harvest_on'] = data.harvest_date(cycle.stocked_on)
+        changes.setdefault('harvest_duration_months', None)
+    for field, value in changes.items():
+        setattr(cycle, field, value)
+    audit(db, user, 'reschedule', 'stocking_cycle', cycle.id, json.dumps({
+        'previous_date': previous.isoformat() if previous else None,
+        'new_date': cycle.expected_harvest_on.isoformat() if cycle.expected_harvest_on else None,
+        'reason': data.reason.strip(),
+    }))
+    db.commit()
+    db.refresh(cycle)
+    return cycle
 
 
 @app.post('/farms/{farm_id}/units/{unit_id}/cycles/{cycle_id}/close', response_model=CycleOut, tags=['Aquaculture operations'])

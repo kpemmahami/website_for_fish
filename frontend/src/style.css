@@ -11,3 +11,89 @@
 .farmactions[role="group"] .outline[aria-pressed="true"]{background:#e8f5ed;border-color:#15765d;color:#155d4b}
 .daily-operations{max-width:100%}.daily-cycle-select{max-width:650px}.daily-cycle-summary{display:flex;flex-wrap:wrap;gap:12px 24px;padding:14px 16px;margin:12px 0 18px;background:#f2f7f4;border-radius:9px;font-size:12px;color:#496459}.daily-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0}.daily-tabs .selected{background:#e8f5ed;border-color:#15765d;color:#155d4b}.daily-form{max-width:760px}.daily-history{margin-top:24px}.daily-history h3{margin:0 0 12px}.daily-cost{max-width:760px;margin-top:16px}.evidence-recorder{display:grid;gap:10px;padding:16px;border:1px solid #dce8e2;border-radius:10px;margin:14px 0 18px}.evidence-recorder .between{align-items:flex-start}.evidence-recorder p{margin:4px 0 0}.evidence-recorder .required{color:#a93c34}.evidence-preview{width:min(100%,520px);max-height:340px;background:#12231d;border-radius:8px}.evidence-live{display:flex;align-items:center;gap:8px;font-size:12px;color:#9c3829}.recording-dot{width:9px;height:9px;border-radius:50%;background:#c43c32;animation:recording-pulse 1s infinite alternate}.evidence-countdown{background:#fff0ed;color:#9c3829}.evidence-message{margin:0}.evidence-retry{justify-content:space-between}.daily-history .tablewrap{margin-top:12px}@keyframes recording-pulse{to{opacity:.35}}@media(max-width:520px){.daily-cycle-summary{display:grid;gap:8px}.evidence-recorder .between{flex-direction:column}.evidence-retry{align-items:flex-start;flex-direction:column}}
 .feed-inventory>summary{font-weight:750;color:#254d41}.feed-inventory .tablewrap{margin:16px 0}.feed-inventory-forms{align-items:start}.feed-inventory-forms h3{margin-top:8px}
+
+.sidebar { overflow-y: auto; }
+.production-nav > button, #production-menu > button { width: 100%; }
+.production-nav > button svg:last-child { margin-left: auto; }
+.production-nav > button .expanded { transform: rotate(180deg); }
+#production-menu { margin: 4px 0 4px 18px; padding-left: 8px; border-left: 1px solid #528375; }
+#production-menu button { padding: 9px 10px; min-height: 38px; }
+#production-menu button[aria-current="page"] { background: #23594c; color: white; }
+.production-intro { color: #526e63; margin: -8px 0 24px; }
+.production-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(205px,100%),1fr)); gap: 16px; }
+.production-card { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; text-align: left; padding: 20px; background: white; border: 1px solid #dce9e3; border-radius: 13px; color: #20352f; box-shadow: 0 3px 15px #1d514409; }
+.production-card:hover, .production-card:focus-visible { border-color: #17846a; background: #f2faf6; }
+.production-card svg, .production-card b { color: #15765d; }
+.production-card span { color: #526e63; font-size: 13px; line-height: 1.5; }
+.production-card b { margin-top: auto; font-size: 13px; }
+.production-back { margin-bottom: 16px; min-height: 44px; }
+.production-record-filter { max-width: 320px; }
+.harvest-calendar { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); gap: 5px; }
+.harvest-calendar > div { padding: 6px; min-height: 54px; background: white; border: 1px solid #e3ebe7; border-radius: 5px; overflow-wrap: anywhere; }
+.harvest-calendar small { display: block; color: #15765d; }
+@media(max-width:800px) {
+ .sidebar nav { flex-wrap: wrap; overflow: visible; }
+ #production-menu button { white-space: normal; min-height: 44px; }
+ .harvest-calendar { font-size: 11px; }
+}
+.workspace-tabs { margin-bottom: 16px; } .workspace-tabs [aria-pressed="true"] { background: #e5f4ed; border-color: #7bb8a4; }
+
+.appraisal-overlay { width: min(1050px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid #cbded5; border-radius: 16px; color: #20352f; background: #f6faf8; }
+.appraisal-overlay::backdrop { background: #142820aa; }
+.appraisal-actions { position: sticky; top: 0; z-index: 1; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 14px 20px; border-bottom: 1px solid #dce8e2; background: #fff; }
+.appraisal-actions button:first-child { margin-right: auto; }
+.appraisal-report { padding: clamp(16px,4vw,40px); overflow-wrap: anywhere; }
+.appraisal-report header { align-items: flex-start; margin-bottom: 18px; border-bottom: 2px solid #15765d; padding-bottom: 14px; }
+.appraisal-report h1 { font-size: clamp(23px,4vw,37px); }
+.appraisal-report header p { margin: 8px 0 0; color: #526e63; }
+.appraisal-report h2 { margin-top: 25px; font-size: 18px; color: #164f40; }
+.appraisal-report h3 { font-size: 14px; margin: 0 0 10px; }
+.appraisal-summary { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(180px,100%),1fr)); gap: 12px; }
+.appraisal-summary > div, .appraisal-group { background: white; border: 1px solid #dce8e2; border-radius: 9px; padding: 14px; }
+.appraisal-summary small, .appraisal-summary strong { display: block; }
+.appraisal-summary strong { font-size: 21px; margin-top: 7px; color: #164f40; }
+.appraisal-group { margin: 8px 0; }
+.appraisal-group dl { margin: 0; display: grid; grid-template-columns: repeat(auto-fit,minmax(min(185px,100%),1fr)); gap: 13px 20px; }
+.appraisal-group dt { color: #526e63; font-size: 12px; margin-bottom: 3px; }
+.appraisal-group dd { margin: 0; font-size: 14px; }
+.appraisal-group p { margin: 3px 0 7px; line-height: 1.45; font-size: 13px; }
+@media print {
+ body:has(.appraisal-overlay[open]) > :not(.appraisal-overlay) { display: none !important; }
+ .appraisal-overlay[open] { position: static; display: block; width: auto; margin: 0; max-width: none; max-height: none; overflow: visible; border: 0; background: white; }
+ .appraisal-overlay::backdrop { background: transparent; }
+ .appraisal-overlay .appraisal-actions, .appraisal-overlay > .alert { display: none; }
+ .appraisal-report { padding: 0; }
+ .appraisal-report h2, .appraisal-report h3 { break-after: avoid; }
+ .appraisal-group dl > div { break-inside: avoid; }
+}
+.production-card.activity-red { background:#fff0ed; border-color:#d99589; } .production-card.activity-amber { background:#fff7e6; border-color:#e3bf75; } .production-status { font-weight:700; }
+.app-error-notice > span { flex: 1; } .app-error-notice > button { font-size: 13px; margin-left: 0; } .app-error-notice > svg { flex-shrink: 0; }
+.pricing-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr)); gap:12px; } .pricing-summary dt { color:#526e63; font-size:12px; } .pricing-summary dd { margin:4px 0 0; font-weight:700; }
+.report-filters fieldset { min-width:0; border:1px solid #dce8e2; border-radius:8px; }
+.report-filters .farmactions { align-items:center; }
+@media print {
+ body.printing-complete-farm .shell * { visibility:hidden; }
+ body.printing-complete-farm .complete-farm-output, body.printing-complete-farm .complete-farm-output * { visibility:visible; }
+ body.printing-complete-farm .complete-farm-output { position:absolute; inset:0; padding:10px; }
+ body.printing-complete-farm .complete-farm-output .tablewrap { overflow:visible; }
+ body.printing-complete-farm .complete-farm-output td { white-space:normal; }
+}
+
+.feeding-session-card{border-inline-start:4px solid #98a3a0}
+.feeding-session-card[data-status="due"]{border-inline-start-color:#a35e00}
+.feeding-session-card[data-status="missed"]{border-inline-start-color:#b33b32}
+.feeding-session-card[data-status="recorded"]{border-inline-start-color:#14735b}
+.feeding-session-card button[aria-pressed="true"]{background:#dcefe7}
+.feeding-window{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,9rem),1fr));gap:.65rem;grid-column:1/-1;min-width:0}
+.daily-operation-fields{display:contents}
+
+.activity-detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:.8rem}
+.activity-detail-grid dt{font-weight:650}.activity-detail-grid dd{margin:0;overflow-wrap:anywhere}
+.activity-media{display:block;max-width:100%;max-height:65vh}
+.farm-activity-history .farmactions{flex-wrap:wrap}
+@media print{
+ body:has(.activity-print) .shell{display:block}
+ body:has(.activity-print) .sidebar,body:has(.activity-print) main>header,body:has(.activity-print) .activity-controls{display:none!important}
+ body:has(.activity-print) main{margin:0;padding:0}
+ .activity-print{border:0;box-shadow:none}.activity-print .tablewrap{overflow:visible}
+}

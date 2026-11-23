@@ -4,8 +4,8 @@ from math import isfinite
 from typing import Literal
 import json
 from fastapi import HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, select, func
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, select, func, update
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import Base, app, Db, CurrentUser, audit
 from .operations import owned_farm, owned_cycle, owned_unit, StockingCycle, FishSample, population, WaterQuality
@@ -40,6 +40,9 @@ class FeedLedger(Base):
     evidence_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recommendation_id: Mapped[int | None] = mapped_column(ForeignKey('feeding_recommendations.id'), nullable=True)
     session_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actual_fed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recorded_by: Mapped[int | None] = mapped_column(Integer)
+    feeding_response: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -125,6 +128,12 @@ class FeedingIn(BaseModel):
     notes: str | None = Field(default=None, max_length=1000)
     recommendation_id: int | None = Field(default=None, gt=0)
     session_number: int | None = Field(default=None, ge=1)
+    schedule_id: int | None = Field(default=None, gt=0)
+    additional_session_event: bool = False
+
+    actual_fed_at: AwareDatetime | None = None
+    feeding_response: str | None = Field(default=None, max_length=200)
+
 
 class LedgerOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -143,6 +152,9 @@ class LedgerOut(BaseModel):
     recommendation_id: int | None
     session_number: int | None
     evidence_id: int | None
+    actual_fed_at: datetime | None
+    recorded_by: int | None
+    feeding_response: str | None
     created_at: datetime
 
 class RecommendationIn(BaseModel):
@@ -451,46 +463,73 @@ def record_feeding(
     db: Db,
     evidence_id: int = Query(gt=0),
 ):
+    from .feeding_sessions import GHANA, freeze_plan, lock_cycle, daily_summary, validate_session
+
     cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
     feed_for_farm(farm_id, data.feed_id, user, db)
-    if cycle.closed_at is not None: raise HTTPException(409, 'Cycle is closed')
+    lock_cycle(db, cycle)
+    previous = db.scalar(select(FeedLedger).where(
+        FeedLedger.cycle_id == cycle_id, FeedLedger.event_type == 'feeding',
+        FeedLedger.evidence_id == evidence_id,
+    ))
+    if previous is not None:
+        if (previous.recorded_by == user.id and previous.feed_id == data.feed_id
+            and previous.quantity_delta_kg == -data.quantity_kg and previous.occurred_on == data.fed_on
+            and previous.recommendation_id == data.recommendation_id and previous.session_number == data.session_number
+            and previous.notes == data.notes and previous.feeding_response == data.feeding_response
+            and (previous.actual_fed_at.replace(tzinfo=None) if previous.actual_fed_at else None) == (
+                data.actual_fed_at.astimezone(GHANA).replace(tzinfo=None) if data.actual_fed_at else None
+            )):
+            return previous
+        raise HTTPException(409, 'This video is already linked to a different feeding entry')
+    db.refresh(cycle)
+    if cycle.closed_at is not None:
+        raise HTTPException(409, 'Cycle is closed')
     valid_date(data.fed_on)
-    if data.fed_on < cycle.stocked_on: raise HTTPException(422, 'Feeding cannot predate stocking')
-    recommendation = None
-    if data.recommendation_id is not None:
-        recommendation = db.get(FeedingRecommendation, data.recommendation_id)
-        if recommendation is None or recommendation.farm_id != farm_id or recommendation.cycle_id != cycle_id or recommendation.feed_id != data.feed_id:
-            raise HTTPException(404, 'Feeding recommendation not found for this farm, cycle, and feed')
-        if recommendation.status != 'approved':
-            raise HTTPException(409, 'Feeding recommendation must be approved before use')
-        if data.session_number is None or data.session_number > recommendation.session_count:
-            raise HTTPException(422, 'Choose a valid feeding session from the approved recommendation')
-        if db.scalar(select(FeedLedger.id).where(
-            FeedLedger.recommendation_id == recommendation.id,
-            FeedLedger.session_number == data.session_number,
-        )) is not None:
-            raise HTTPException(409, 'This recommended feeding session is already recorded')
-    elif data.session_number is not None:
-        raise HTTPException(422, 'A feeding session number requires an approved recommendation')
-    if stock(data.feed_id, db) + 1e-8 < data.quantity_kg: raise HTTPException(409, 'Insufficient feed stock')
+    if data.fed_on < cycle.stocked_on:
+        raise HTTPException(422, 'Feeding cannot predate stocking')
+    actual = data.actual_fed_at.astimezone(GHANA) if data.actual_fed_at else None
+    if actual and (actual.date() != data.fed_on or actual > now()):
+        raise HTTPException(422, 'Actual feeding time must be on the feeding date and cannot be in the future')
+    if data.session_number is None:
+        if data.schedule_id is not None or data.recommendation_id is not None:
+            raise HTTPException(422, 'Select a session or record an unscheduled feeding')
+        if daily_summary(db, cycle, data.fed_on)['scheduled_count'] and not (data.notes or '').strip():
+            raise HTTPException(422, 'Explain why this feeding was unscheduled')
+    else:
+        plan, _ = freeze_plan(db, cycle, data.fed_on, data.recommendation_id)
+        if data.schedule_id != plan.schedule_id or data.recommendation_id != plan.recommendation_id:
+            raise HTTPException(409, 'The session schedule changed. Refresh and select the session again.')
+        row = validate_session(db, cycle, data.fed_on, data.session_number, actual, plan)
+        if plan.schedule_id and row['status'] == 'recorded' and not data.additional_session_event:
+            raise HTTPException(409, 'This session is completed. Choose Add feed entry to record additional feeding.')
+    db.execute(update(FeedProduct).where(FeedProduct.id == data.feed_id).values(farm_id=FeedProduct.farm_id))
+    available = stock(data.feed_id, db)
+    if available + 1e-8 < data.quantity_kg:
+        raise HTTPException(409, f'Insufficient feed stock. Only {max(0, available):.4f} kg is available.')
     entry = FeedLedger(feed_id=data.feed_id, event_type='feeding', quantity_delta_kg=-data.quantity_kg,
                        cycle_id=cycle_id, occurred_on=data.fed_on, notes=data.notes,
-                       recommendation_id=recommendation.id if recommendation else None,
-                       session_number=data.session_number)
-    db.add(entry); db.flush(); audit(db, user, 'create', 'feeding', entry.id, json.dumps({'cycle_id': cycle_id, 'quantity_kg': data.quantity_kg}))
+                       recommendation_id=data.recommendation_id, session_number=data.session_number,
+                       actual_fed_at=actual, recorded_by=user.id, feeding_response=data.feeding_response,
+                       evidence_id=evidence_id)
+    db.add(entry)
+    db.flush()
+    audit(db, user, 'create', 'feeding', entry.id, json.dumps({
+        'cycle_id': cycle_id, 'quantity_kg': data.quantity_kg, 'session_number': data.session_number,
+    }))
     from .evidence import attach_record_evidence
     attach_record_evidence(db, evidence_id, farm_id, unit_id, cycle_id, 'feeding', entry.id, user)
-    db.commit(); db.refresh(entry); return entry
+    db.commit()
+    db.refresh(entry)
+    return entry
 
 @app.get('/farms/{farm_id}/units/{unit_id}/cycles/{cycle_id}/feeding', response_model=list[LedgerOut], tags=['Feeding and inventory'])
 def list_feeding(farm_id: int, unit_id: int, cycle_id: int, user: CurrentUser, db: Db):
     owned_cycle(farm_id, unit_id, cycle_id, user, db)
     return db.scalars(select(FeedLedger).where(FeedLedger.cycle_id == cycle_id, FeedLedger.event_type == 'feeding').order_by(FeedLedger.id)).all()
 
-@app.post('/farms/{farm_id}/units/{unit_id}/cycles/{cycle_id}/feeding-estimate', tags=['Feeding and inventory'])
-def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: RecommendationIn, user: CurrentUser, db: Db):
-    cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
-    feed = feed_for_farm(farm_id, data.feed_id, user, db)
+def evaluate_ration(farm_id, cycle, feed, data, db, *, require_confirmation=True):
+    unit_id, cycle_id = cycle.unit_id, cycle.id
     pop = population(cycle, db)
     from .evidence import RecordEvidence
     sampling = db.scalar(
@@ -514,7 +553,7 @@ def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: Recommenda
         FarmFeedingProfileApproval.profile_version == FEEDING_PROFILE_VERSION,
         FarmFeedingProfileApproval.active.is_(True),
     ))
-    if approval is None:
+    if approval is None and require_confirmation:
         raise HTTPException(409, 'The farm owner must confirm the advisory species profile before calculating a ration')
     profile = feeding_profile(cycle.species, average_weight_g)
     if profile is None:
@@ -537,49 +576,88 @@ def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: Recommenda
         )
         .order_by(WaterQuality.observed_at.desc(), WaterQuality.id.desc())
     )
+    recent_water = db.scalar(select(WaterQuality).where(WaterQuality.unit_id == unit_id)
+                            .order_by(WaterQuality.observed_at.desc(), WaterQuality.id.desc()))
     recommendation_suspended = False
+    if recent_water and latest and recent_water.id != latest.id and recent_water.observed_at >= latest.observed_at:
+        warnings.append('Review the latest water-quality evidence before using the ration.')
+        recommendation_suspended = True
+    water_expired = False
+    if approval is None:
+        warnings.append('Confirm the farm?s feeding profile for this species before reviewing a ration.')
+    from .sales import HarvestLot
+    if db.scalar(select(HarvestLot.id).where(HarvestLot.cycle_id == cycle_id, HarvestLot.fish_count.is_(None)).limit(1)):
+        warnings.append('Review harvested fish counts. A harvest is missing its fish count.')
+        recommendation_suspended = True
+    if pop.estimated_live_count <= 0:
+        warnings.append('Review the stocking and live fish count for this cycle.')
+        recommendation_suspended = True
+    if feed and feed.pellet_size_mm is not None and not profile['pellet_size_min_mm'] <= feed.pellet_size_mm <= profile['pellet_size_max_mm']:
+        warnings.append('Review the feed product. Its pellet size falls outside the species and weight profile.')
+        recommendation_suspended = True
+    sample_expired = sampling is not None and (now().date() - sampling.sampled_on).days > 7
+    if sample_expired:
+        warnings.append('Record a fresh verified fish sample. The last verified sample is more than seven days old.')
     if sampling is None:
         warnings.append('No verified fish sample is available; stocking weight is used only for a provisional estimate.')
-        recommendation_suspended = True
     if latest is None or latest.dissolved_oxygen_mg_l is None:
         warnings.append('No dissolved oxygen reading available: check water quality before feeding.')
         recommendation_suspended = True
     else:
         observed_at = latest.observed_at.replace(tzinfo=latest.observed_at.tzinfo or timezone.utc)
         age = (now() - observed_at.astimezone(timezone.utc)).total_seconds()/3600
-        if age > data.max_water_age_hours:
+        if age > min(data.max_water_age_hours, 24):
             warnings.append('Latest water-quality reading is older than the configured freshness limit.')
-            recommendation_suspended = True
-        if latest.dissolved_oxygen_mg_l < data.minimum_do_mg_l:
+            water_expired = True
+        if latest.dissolved_oxygen_mg_l < max(data.minimum_do_mg_l, 4):
             warnings.append('Dissolved oxygen below your configured alert threshold: assess conditions before feeding.')
             recommendation_suspended = True
-        if data.minimum_temperature_c is not None and latest.temperature_c is not None:
-            if not data.minimum_temperature_c <= latest.temperature_c <= data.maximum_temperature_c:
-                warnings.append('Temperature is outside the farm-configured feeding range.')
+        if data.minimum_temperature_c is not None:
+            if latest.temperature_c is None or not data.minimum_temperature_c <= latest.temperature_c <= data.maximum_temperature_c:
+                warnings.append('Temperature is missing or outside the farm-configured feeding range.')
                 recommendation_suspended = True
-        if data.minimum_ph is not None and latest.ph is not None:
-            if not data.minimum_ph <= latest.ph <= data.maximum_ph:
-                warnings.append('pH is outside the farm-configured feeding range.')
+        if data.minimum_ph is not None:
+            if latest.ph is None or not data.minimum_ph <= latest.ph <= data.maximum_ph:
+                warnings.append('pH is missing or outside the farm-configured feeding range.')
                 recommendation_suspended = True
-        if data.maximum_ammonia_mg_l is not None and latest.ammonia_mg_l is not None and latest.ammonia_mg_l > data.maximum_ammonia_mg_l:
-            warnings.append('Ammonia exceeds the farm-configured limit; pause the recommendation and investigate.')
+        if data.maximum_ammonia_mg_l is not None and (latest.ammonia_mg_l is None or latest.ammonia_mg_l > data.maximum_ammonia_mg_l):
+            warnings.append('Ammonia is missing or exceeds the farm-configured limit.')
             recommendation_suspended = True
-        if data.maximum_nitrite_mg_l is not None and latest.nitrite_mg_l is not None and latest.nitrite_mg_l > data.maximum_nitrite_mg_l:
-            warnings.append('Nitrite exceeds the farm-configured limit; pause the recommendation and investigate.')
+        if data.maximum_nitrite_mg_l is not None and (latest.nitrite_mg_l is None or latest.nitrite_mg_l > data.maximum_nitrite_mg_l):
+            warnings.append('Nitrite is missing or exceeds the farm-configured limit.')
             recommendation_suspended = True
-    daily_ration = round(biomass_kg * rate / 100, 4)
+    daily_ration = round(max(0, biomass_kg) * rate / 100, 4)
     session_ration = round(daily_ration / profile['sessions_per_day'], 4)
     snapshot = {
         'feed_product': {'id': feed.id, 'name': feed.name, 'pellet_size_mm': feed.pellet_size_mm,
-                         'protein_pct': feed.protein_pct, 'stock_kg': stock(feed.id, db)},
+                         'protein_pct': feed.protein_pct, 'stock_kg': stock(feed.id, db)} if feed else None,
         'profile': profile,
         'estimated_population': pop.estimated_live_count,
         'average_weight_g': average_weight_g,
         'sampling_id': sampling.id if sampling else None,
+        'sampled_on': sampling.sampled_on.isoformat() if sampling else None,
+        'water_observed_at': latest.observed_at.isoformat() if latest else None,
         'water_quality_id': latest.id if latest else None,
         'water_limits': data.model_dump(exclude={'feed_id', 'daily_feeding_rate_pct'}),
         'calculated_at': now().isoformat(),
     }
+    status = ('suspended' if recommendation_suspended else 'expired' if sample_expired or water_expired else
+              'provisional' if sampling is None else 'pending_approval')
+    return dict(status=status, approval=approval, profile=profile, rate=rate, daily_ration=daily_ration,
+                session_ration=session_ration, biomass_kg=biomass_kg, snapshot=snapshot, warnings=warnings)
+
+
+@app.post('/farms/{farm_id}/units/{unit_id}/cycles/{cycle_id}/feeding-estimate', tags=['Feeding and inventory'])
+def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: RecommendationIn, user: CurrentUser, db: Db):
+    cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
+    if cycle.closed_at:
+        raise HTTPException(409, 'Cycle is closed')
+    feed = feed_for_farm(farm_id, data.feed_id, user, db)
+    result = evaluate_ration(farm_id, cycle, feed, data, db)
+    profile, rate, snapshot = result['profile'], result['rate'], result['snapshot']
+    daily_ration, session_ration, biomass_kg = result['daily_ration'], result['session_ration'], result['biomass_kg']
+    warnings = result['warnings']
+    average_weight_g = snapshot['average_weight_g']
     recommendation = FeedingRecommendation(
         farm_id=farm_id,
         unit_id=unit_id,
@@ -587,10 +665,10 @@ def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: Recommenda
         feed_id=feed.id,
         created_by=user.id,
         profile_version=FEEDING_PROFILE_VERSION,
-        profile_approval_id=approval.id,
-        sampling_id=sampling.id if sampling else None,
-        water_quality_id=latest.id if latest else None,
-        estimated_live_count=pop.estimated_live_count,
+        profile_approval_id=result['approval'].id,
+        sampling_id=snapshot['sampling_id'],
+        water_quality_id=snapshot['water_quality_id'],
+        estimated_live_count=snapshot['estimated_population'],
         average_weight_g=average_weight_g,
         estimated_biomass_kg=biomass_kg,
         daily_rate_pct=rate,
@@ -601,7 +679,7 @@ def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: Recommenda
         pellet_size_max_mm=profile['pellet_size_max_mm'],
         inputs_json=json.dumps(snapshot, default=str),
         warnings_json=json.dumps(warnings),
-        status='suspended' if recommendation_suspended else 'pending_approval',
+        status=result['status'],
     )
     db.add(recommendation)
     db.flush()
@@ -611,7 +689,7 @@ def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: Recommenda
     }))
     db.commit()
     return {'recommendation_id': recommendation.id, 'species': cycle.species,
-            'estimated_live_count': pop.estimated_live_count,
+            'estimated_live_count': snapshot['estimated_population'],
             'average_weight_g': average_weight_g,
             'estimated_biomass_kg': biomass_kg,
             'profile': profile,
@@ -622,7 +700,8 @@ def feeding_estimate(farm_id: int, unit_id: int, cycle_id: int, data: Recommenda
             'pellet_size_min_mm': profile['pellet_size_min_mm'],
             'pellet_size_max_mm': profile['pellet_size_max_mm'],
             'warnings': warnings,
-            'automatic_recommendation_suspended': recommendation_suspended,
+            'automatic_recommendation_suspended': result['status'] != 'pending_approval',
+            'inputs': snapshot,
             'status': recommendation.status,
             'estimate_only': True}
 
@@ -641,10 +720,25 @@ def approve_feeding_recommendation(
     ))
     if item is None:
         raise HTTPException(404, 'Feeding recommendation not found')
-    if item.status == 'suspended':
-        raise HTTPException(409, 'Resolve the safety and data warnings before approving this recommendation')
     if item.status == 'approved':
         raise HTTPException(409, 'Feeding recommendation is already approved')
+    if item.status != 'pending_approval':
+        raise HTTPException(409, 'Resolve the safety and data warnings before approving this recommendation')
+    from .feeding_sessions import lock_cycle
+    cycle = owned_cycle(farm_id, item.unit_id, item.cycle_id, user, db)
+    lock_cycle(db, cycle)
+    db.refresh(item)
+    db.refresh(cycle)
+    if cycle.closed_at or item.status != 'pending_approval':
+        raise HTTPException(409, 'This recommendation is no longer awaiting approval')
+    current = evaluate_saved_ration(farm_id, cycle, item, db)
+    snapshot = current['snapshot']
+    if (current['status'] != 'pending_approval' or item.sampling_id != snapshot['sampling_id']
+        or item.water_quality_id != snapshot['water_quality_id']
+        or item.estimated_live_count != snapshot['estimated_population']
+        or item.profile_approval_id != current['approval'].id
+        or item.profile_version != current['profile']['version']):
+        raise HTTPException(409, 'Farm records changed. Calculate and review a fresh recommendation.')
     item.status = 'approved'
     item.approved_by = user.id
     item.approved_at = now()
@@ -654,6 +748,14 @@ def approve_feeding_recommendation(
     }))
     db.commit()
     return recommendation_view(item)
+
+
+def evaluate_saved_ration(farm_id, cycle, item, db):
+    saved = json.loads(item.inputs_json)
+    feed = db.get(FeedProduct, item.feed_id)
+    data = RecommendationIn(feed_id=item.feed_id, daily_feeding_rate_pct=item.daily_rate_pct,
+                            **saved.get('water_limits', {}))
+    return evaluate_ration(farm_id, cycle, feed, data, db)
 
 
 @app.get('/farms/{farm_id}/feeding-recommendations', tags=['Feeding and inventory'])
@@ -687,52 +789,29 @@ def feed_forecast(
     db: Db,
     forecast_days: int = Query(default=30, ge=1, le=180),
 ):
-    owned_farm(farm_id, user, db)
-    from .operations import StockingCycle
-    from .main import ProductionUnit
-    active_ids = db.scalars(select(StockingCycle.id).join(
-        ProductionUnit, StockingCycle.unit_id == ProductionUnit.id
-    ).where(ProductionUnit.farm_id == farm_id, StockingCycle.closed_at.is_(None))).all()
-    active_cycle_ids = select(StockingCycle.id).join(
-        ProductionUnit, StockingCycle.unit_id == ProductionUnit.id
-    ).where(ProductionUnit.farm_id == farm_id, StockingCycle.closed_at.is_(None))
-    recommendations = db.scalars(select(FeedingRecommendation).where(
-        FeedingRecommendation.cycle_id.in_(active_cycle_ids),
-        FeedingRecommendation.status == 'approved',
-    ).order_by(FeedingRecommendation.created_at.desc(), FeedingRecommendation.id.desc())).all()
-    latest_by_cycle = {}
-    for item in recommendations:
-        latest_by_cycle.setdefault(item.cycle_id, item)
-    demand_by_feed: dict[int, float] = {}
-    for cycle_id, item in latest_by_cycle.items():
-        daily = item.daily_ration_kg
-        demand_by_feed[item.feed_id] = demand_by_feed.get(item.feed_id, 0) + daily
-    feeds = db.scalars(select(FeedProduct).where(FeedProduct.farm_id == farm_id)).all()
+    from .feed_outlook import feed_outlook
+
+    return forecast_inventory(feed_outlook(farm_id, user, db), farm_id, forecast_days)
+
+
+def forecast_inventory(outlook, farm_id, forecast_days):
     projections = []
-    for feed in feeds:
-        daily_demand = demand_by_feed.get(feed.id, 0)
-        current = stock(feed.id, db)
-        projected = daily_demand * forecast_days
+    for row in outlook['inventory']:
+        daily = row['required_kg'] / len(outlook['dates'])
+        quantity = daily * forecast_days
+        available = row['available_kg']
         projections.append({
-            'feed_id': feed.id,
-            'feed_name': feed.name,
-            'current_stock_kg': current,
-            'approved_daily_demand_kg': round(daily_demand, 4),
-            'forecast_days': forecast_days,
-            'expected_usage_kg': round(projected, 4),
-            'projected_stock_kg': round(current - projected, 4),
-            'days_until_shortage': round(current / daily_demand, 1) if daily_demand > 0 else None,
-            'shortage_expected': daily_demand > 0 and current < projected,
+            'feed_id': row['feed_id'], 'feed_name': row['name'], 'current_stock_kg': available,
+            'approved_daily_demand_kg': round(daily, 4), 'forecast_days': forecast_days,
+            'expected_usage_kg': round(quantity, 4), 'projected_stock_kg': round(available - quantity, 4),
+            'days_until_shortage': row['coverage_days'],
+            'shortage_expected': daily > 0 and available < quantity,
         })
     return {
-        'farm_id': farm_id,
-        'forecast_days': forecast_days,
-        'basis': 'Approved advisory recommendations; assumes current daily rations remain constant.',
+        'farm_id': farm_id, 'forecast_days': forecast_days,
+        'basis': 'Current validated approved rations held constant across the projection.',
         'feeds': projections,
-        'cycles_without_approved_recommendation': [
-            cycle_id for cycle_id in active_ids
-            if cycle_id not in latest_by_cycle
-        ],
+        'cycles_without_approved_recommendation': [row['cycle_id'] for row in outlook['cycles'] if not row['forecast']],
     }
 
 

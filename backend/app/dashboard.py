@@ -1,14 +1,14 @@
 """Phase 0007: read-only, farm-scoped operational and financial analytics."""
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import date, timedelta
 from math import ceil
 from fastapi import Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from .main import app, Db, CurrentUser, owned_farm, ProductionUnit
-from .operations import StockingCycle, FishSample, WaterQuality, population
-from .feeding import FeedProduct, FeedLedger, feed_forecast
-from .forecasting import ProductionPlan
-from .automated_costing import cost_report
+from .operations import StockingCycle, FishSample, FishTransfer, Mortality, WaterQuality, population
+from .feeding import FeedProduct, FeedLedger, FeedingRecommendation, forecast_inventory
+from .forecasting import ProductionPlan, CycleExpense
+from .automated_costing import SharedCostAllocation, cost_report
 from .sales import Customer, HarvestLot, FishSale, SalePayment, remaining_kg, ghs
 
 
@@ -27,23 +27,57 @@ def farm_data(farm_id, user, db):
     return units, cycles, feeds, ledger, lots, sales, payments, plans
 
 
+def recorded_costs(plans, ledger, db):
+    plans_by_id = {plan.id: plan for plan in plans}
+    expenses = db.scalars(select(CycleExpense).where(CycleExpense.plan_id.in_(plans_by_id)))
+    allocations = db.scalars(select(SharedCostAllocation).where(SharedCostAllocation.plan_id.in_(plans_by_id)))
+    priced_kg, priced_cost, consumed = defaultdict(float), defaultdict(float), defaultdict(float)
+    fed_cycles = set()
+    for entry in ledger:
+        if entry.event_type == 'receipt' and entry.cost_ghs is not None and entry.quantity_delta_kg > 0:
+            priced_kg[entry.feed_id] += entry.quantity_delta_kg
+            priced_cost[entry.feed_id] += entry.cost_ghs
+        elif entry.event_type == 'feeding':
+            consumed[entry.feed_id] -= entry.quantity_delta_kg
+            fed_cycles.add(entry.cycle_id)
+    manual = sum(
+        expense.amount_ghs for expense in expenses
+        if expense.category != 'feed' or plans_by_id[expense.plan_id].cycle_id not in fed_cycles
+    )
+    allocated = sum(allocation.amount_ghs for allocation in allocations)
+    feed_cost = sum(kg * priced_cost[feed] / priced_kg[feed] for feed, kg in consumed.items() if priced_kg[feed])
+    return round(manual + allocated + feed_cost, 2), any(not priced_kg[feed] for feed in consumed)
+
+
 def build_dashboard(farm_id, user, db):
     units, cycles, feeds, ledger, lots, sales, payments, plans = farm_data(farm_id, user, db)
-    active = [c for c in cycles if c.closed_at is None]
+    active_units = {unit.id for unit in units if unit.is_active}
+    active = [c for c in cycles if c.closed_at is None and c.unit_id in active_units]
     populations = [population(c, db) for c in active]
     feed_totals = defaultdict(float)
     for e in ledger: feed_totals[e.feed_id] += e.quantity_delta_kg
     revenue = sum(s.total_pesewas for s in sales)
     received = sum(p.amount_pesewas for p in payments)
     cost_reports = [cost_report(p, db) for p in plans]
+    recorded, missing_feed_prices = recorded_costs(plans, ledger, db)
+    from .farm_expenses import FarmExpense
+    register_operating_cost = sum(db.scalars(select(FarmExpense.amount_pesewas).where(
+        FarmExpense.farm_id == farm_id, FarmExpense.classification == 'operating',
+    )))
+    recorded = round(recorded + ghs(register_operating_cost), 2)
+
+    paid_by_sale = defaultdict(int)
+    for payment in payments:
+        paid_by_sale[payment.sale_id] += payment.amount_pesewas
+    receivables = sum(max(0, sale.total_pesewas - paid_by_sale[sale.id]) for sale in sales)
     return {
         'farm_id': farm_id, 'currency': 'GHS',
         'production': {'total_units': len(units), 'active_units': sum(u.is_active for u in units),
                        'total_cycles': len(cycles), 'active_cycles': len(active),
                        'stocked_fish_in_active_cycles': sum(c.stocked_count for c in active),
-                       'estimated_live_fish': sum(p.estimated_live_count for p in populations),
-                       'estimated_live_biomass_kg': round(sum(p.estimated_biomass_kg for p in populations), 4),
-                       'note': 'Estimated biomass is sample-based and excludes harvested-fish adjustments; do not treat as verified live inventory.'},
+                       'estimated_live_fish': sum(max(0, p.estimated_live_count) for p in populations),
+                       'estimated_live_biomass_kg': round(sum(max(0, p.estimated_biomass_kg) for p in populations), 4),
+                       'note': 'Biomass uses the latest sample or initial stocking weight and accounts for recorded harvests and transfers.'},
         'feed': {'products': len(feeds), 'remaining_stock_kg': round(sum(feed_totals.values()), 4),
                  'consumed_kg': round(-sum(e.quantity_delta_kg for e in ledger if e.event_type == 'feeding'), 4),
                  'by_product': [{'feed_id': f.id, 'name': f.name, 'stock_kg': round(feed_totals[f.id], 4)} for f in feeds]},
@@ -52,11 +86,12 @@ def build_dashboard(farm_id, user, db):
                   'available_harvest_kg': round(sum(remaining_kg(db, l) for l in lots), 4),
                   'sold_kg': round(sum(s.quantity_kg for s in sales), 4),
                   'sales_count': len(sales), 'invoiced_revenue_ghs': ghs(revenue),
-                  'payments_received_ghs': ghs(received), 'outstanding_receivables_ghs': ghs(revenue-received)},
+                  'payments_received_ghs': ghs(received), 'outstanding_receivables_ghs': ghs(receivables)},
         'costs': {'production_plan_count': len(plans),
                   'projected_cycle_costs_ghs': round(sum(r['projected_cycle_total_cost_ghs'] for r in cost_reports), 2),
-                  'recorded_costs_to_date_ghs': round(sum(r['actual_costs_to_date_ghs'] for r in cost_reports), 2),
-                  'note': 'Totals sum plan-level costs; overlapping plans for one cycle can double count. Not a net-profit calculation.'},
+                  'recorded_costs_to_date_ghs': recorded,
+                  'missing_feed_prices': missing_feed_prices,
+                  'note': 'Recorded expenses and allocations plus estimated consumed-feed cost. Feed purchases are inventory acquisitions.'},
         'warnings': ['Sales revenue is not cash received or net profit.',
                      'Feed purchases are stock acquisitions; feeding consumption is valued separately.',
                      'Dashboard totals include historical sales and costs; no period filter is applied.']
@@ -76,15 +111,20 @@ def cycle_dashboard(farm_id: int, user: CurrentUser, db: Db):
     for c in cycles:
         p = population(c, db)
         rows.append({'cycle_id': c.id, 'unit_id': c.unit_id, 'unit_name': by_unit[c.unit_id].name,
-                     'species': c.species, 'status': 'closed' if c.closed_at else 'active',
+                     'species': c.species, 'status': 'closed' if c.closed_at else 'active' if by_unit[c.unit_id].is_active else 'inactive',
                      'stocked_on': c.stocked_on, 'stocked_count': p.stocked_count,
+                     'initial_average_weight_g': c.initial_average_weight_g,
                      'mortality_count': p.total_mortality,
                      'mortality_pct': round(100*p.total_mortality/c.stocked_count, 2) if c.stocked_count else None,
-                     'estimated_live_count': p.estimated_live_count,
+                     'estimated_live_count': max(0, p.estimated_live_count),
+                     'population_warning': 'Recorded removals exceed fish stocked and transferred in.' if p.estimated_live_count < 0 else None,
+                     'harvested_count': p.total_harvested,
+                     'estimated_survival_pct': p.estimated_survival_pct,
+                     'expected_harvest_on': c.expected_harvest_on,
                      'latest_average_weight_g': p.latest_average_weight_g,
-                     'estimated_biomass_kg': p.estimated_biomass_kg,
+                     'estimated_biomass_kg': max(0, p.estimated_biomass_kg),
                      'latest_sampled_on': p.latest_sampled_on})
-    return {'farm_id': farm_id, 'cycles': rows, 'note': 'Historical estimates do not subtract harvested fish.'}
+    return {'farm_id': farm_id, 'cycles': rows, 'note': 'Counts incorporate recorded mortality, harvests and transfers.'}
 
 
 @app.get('/farms/{farm_id}/dashboard/monthly', tags=['Dashboard and reporting'])
@@ -125,7 +165,7 @@ def monthly_dashboard(farm_id: int, user: CurrentUser, db: Db, year: int = Query
 def build_analytics(farm_id: int, user, db):
     farm = owned_farm(farm_id, user, db)
     dashboard_data = build_dashboard(farm_id, user, db)
-    units, cycles, feeds, ledger, _, _, _, plans = farm_data(farm_id, user, db)
+    units, cycles, feeds, ledger, lots, _, _, plans = farm_data(farm_id, user, db)
     unit_by_id = {unit.id: unit for unit in units}
     cycles_by_id = {cycle.id: cycle for cycle in cycles}
     cycle_rows = cycle_dashboard(farm_id, user, db)['cycles']
@@ -135,11 +175,30 @@ def build_analytics(farm_id: int, user, db):
         .order_by(FishSample.sampled_on, FishSample.id)
     ).all() if cycle_ids else []
     samples_by_cycle = defaultdict(list)
+    sample_cycles = {sample.cycle_id for sample in samples}
+    movement = defaultdict(list)
+    for row in db.scalars(select(Mortality).where(Mortality.cycle_id.in_(sample_cycles))):
+        movement[row.cycle_id].append((row.observed_on,-row.dead_count))
+    for row in db.scalars(select(FishTransfer).where(or_(
+        FishTransfer.source_cycle_id.in_(sample_cycles),FishTransfer.target_cycle_id.in_(sample_cycles),
+    ))):
+        movement[row.source_cycle_id].append((row.transferred_on,-row.fish_count-row.loss_count))
+        movement[row.target_cycle_id].append((row.transferred_on,row.fish_count))
+    for row in lots:
+        movement[row.cycle_id].append((row.harvested_on,None if row.fish_count is None else -row.fish_count))
+    pending = {cycle_id:deque(sorted(events,key=lambda event:event[0])) for cycle_id,events in movement.items()}
+    live_counts = {cycle.id:cycle.stocked_count for cycle in cycles}
     growth_trends = []
     for sample in samples:
         cycle = cycles_by_id[sample.cycle_id]
         unit = unit_by_id[cycle.unit_id]
         samples_by_cycle[sample.cycle_id].append(sample)
+        events = pending.get(cycle.id)
+        while events and events[0][0] <= sample.sampled_on:
+            _, change = events.popleft()
+            count = live_counts[cycle.id]
+            live_counts[cycle.id] = count + change if count is not None and change is not None else None
+        count = live_counts[cycle.id]
         growth_trends.append({
             'cycle_id': cycle.id,
             'unit_id': unit.id,
@@ -148,6 +207,7 @@ def build_analytics(farm_id: int, user, db):
             'sampled_on': sample.sampled_on,
             'average_weight_g': sample.average_weight_g,
             'sample_count': sample.sample_count,
+            'estimated_biomass_kg': round(count * sample.average_weight_g / 1000,4) if count is not None and count >= 0 else None,
         })
 
     feed_by_cycle = defaultdict(float)
@@ -165,7 +225,20 @@ def build_analytics(farm_id: int, user, db):
     pricing_by_plan = {plan.id: cost_report(plan, db) for plan in plans}
     today = date.today()
     for cycle in cycles:
-        if cycle.closed_at is not None:
+        if cycle.closed_at is not None or not unit_by_id[cycle.unit_id].is_active:
+            continue
+        if cycle.expected_harvest_on is not None:
+            current = population(cycle, db)
+            count = max(0, current.estimated_live_count)
+            if cycle.expected_survival_pct is not None:
+                count = min(count, max(0, int(cycle.stocked_count * cycle.expected_survival_pct / 100) - current.total_harvested))
+            harvest_forecasts.append({
+                'cycle_id': cycle.id, 'unit_name': unit_by_id[cycle.unit_id].name, 'species': cycle.species,
+                'expected_harvest_kg': round(count * cycle.target_harvest_weight_g / 1000, 4) if cycle.target_harvest_weight_g is not None else None,
+                'expected_harvest_on': cycle.expected_harvest_on,
+                'date_basis': 'farmer_schedule',
+                'note': 'Farmer-planned harvest date.',
+            })
             continue
         matching_plans = plans_by_cycle.get(cycle.id, [])
         if not matching_plans:
@@ -327,6 +400,24 @@ def build_analytics(farm_id: int, user, db):
         round(sum(available_harvest_forecasts), 2)
         if available_harvest_forecasts else None
     )
+    recommendations = db.scalars(select(FeedingRecommendation).where(
+        FeedingRecommendation.farm_id == farm_id,
+        FeedingRecommendation.status == 'approved',
+    ).order_by(FeedingRecommendation.created_at.desc(), FeedingRecommendation.id.desc()))
+    latest_recommendations = {}
+    for recommendation in recommendations:
+        latest_recommendations.setdefault(recommendation.cycle_id, recommendation)
+    today_feed = defaultdict(float)
+    for entry in ledger:
+        if entry.event_type == 'feeding' and entry.occurred_on == today:
+            today_feed[entry.cycle_id] -= entry.quantity_delta_kg
+    for row in active_cycle_rows:
+        recommendation = latest_recommendations.get(row['cycle_id'])
+        row['today_actual_feed_kg'] = round(today_feed[row['cycle_id']], 4)
+        row['approved_daily_feed_kg'] = recommendation.daily_ration_kg if recommendation else None
+        row['feeding_plan_updated_at'] = (recommendation.approved_at or recommendation.created_at) if recommendation else None
+    from .feed_outlook import feed_outlook
+    outlook = feed_outlook(farm_id, user, db)
     return {
         'farm': {
             'farm_id': farm.id,
@@ -371,7 +462,8 @@ def build_analytics(farm_id: int, user, db):
         },
         'feed': {
             'inventory': feed_inventory,
-            'forecast': feed_forecast(farm_id, user, db, 30),
+            'forecast': forecast_inventory(outlook, farm_id, 30),
+            'weekly_forecast': forecast_inventory(outlook, farm_id, 7),
         },
         'finance': {
             'sales': dashboard_data['sales'],
@@ -381,7 +473,7 @@ def build_analytics(farm_id: int, user, db):
         },
         'warnings': [
             'Survival, biomass, FCR, harvest, and financial metrics are record-derived estimates, not independently verified results.',
-            'Harvest dates use a linear projection from the two latest samples and are unavailable without sufficient positive growth data.',
+            'Harvest dates use farmer schedules and sample-based forecasts.',
             'Feed cost uses weighted-average priced receipts; it is not FIFO. Overlapping production plans can duplicate projected costs.',
             'Invoiced sales are not cash received, and operating cash flow is not net profit.',
         ],
