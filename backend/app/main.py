@@ -506,4 +506,16 @@ def configure_cors(api: FastAPI, configured: str) -> None:
                            expose_headers=['X-Request-ID', 'Content-Disposition'])
 
 
-configure_cors(app, os.getenv('CORS_ALLOWED_ORIGINS', ''))
+DEPLOYED_FRONTEND_ORIGIN = 'https://aquafarm-ghana-frontend.onrender.com'
+LOCAL_VITE_ORIGINS = tuple(
+    f'http://{host}:{port}'
+    for host in ('localhost', '127.0.0.1')
+    for port in (5173, 5174)
+)
+
+# Register last so preflights are handled before diagnostics and routing.
+allowed_origins = [DEPLOYED_FRONTEND_ORIGIN]
+if os.getenv('RENDER', '').lower() != 'true':
+    allowed_origins.extend(LOCAL_VITE_ORIGINS)
+allowed_origins.append(os.getenv('CORS_ALLOWED_ORIGINS', ''))
+configure_cors(app, ','.join(allowed_origins))

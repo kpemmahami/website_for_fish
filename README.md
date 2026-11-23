@@ -66,9 +66,9 @@ an ephemeral database.
 
 For the Render static site, set the build-time variable
 `VITE_API_BASE_URL` to the backend's public HTTPS URL without a trailing
-`/api`. Set the backend's `CORS_ALLOWED_ORIGINS` to the static site's
-public origin, without a path. Separate multiple allowed origins with
-commas. Rebuild the static site after setting the variable. If the frontend
+`/api`. The AquaFarm Render frontend origin is allowed by default. To allow
+additional frontend origins, set `CORS_ALLOWED_ORIGINS` on the backend
+to a comma-separated list of exact origins without paths. Rebuild the static site after setting the variable. If the frontend
 uses a same-origin `/api/*` rewrite or the local Vite proxy, leave the
 frontend variable unset. After deployment, `GET /ready` checks database
 connectivity and the registration tables without writing a record.

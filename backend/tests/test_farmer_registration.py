@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -103,3 +105,23 @@ def test_readiness_verifies_registration_schema_without_exposing_details(monkeyp
             app.dependency_overrides.pop(get_db)
         assert result.status_code == 503
         assert result.json() == {'detail': 'Service is temporarily unavailable'}
+
+def test_deployed_frontend_preflight_on_actual_application():
+    origin = 'https://aquafarm-ghana-frontend.onrender.com'
+    headers = {'Origin': origin, 'Access-Control-Request-Method': 'POST',
+               'Access-Control-Request-Headers': 'content-type,authorization'}
+    preflight = client.options(PATH, headers=headers)
+    assert preflight.status_code == 200
+    assert preflight.headers['Access-Control-Allow-Origin'] == origin
+    assert 'POST' in preflight.headers['Access-Control-Allow-Methods']
+    assert {'content-type', 'authorization'} <= {
+        item.strip() for item in preflight.headers['Access-Control-Allow-Headers'].lower().split(',')
+    }
+    assert 'access-control-allow-credentials' not in preflight.headers
+    assert 'x-request-id' not in preflight.headers
+    denied = client.options(PATH, headers={**headers, 'Origin': origin + '.example.invalid'})
+    assert denied.status_code == 400
+    assert 'access-control-allow-origin' not in denied.headers
+    if os.getenv('RENDER', '').lower() != 'true':
+        local = client.options(PATH, headers={**headers, 'Origin': 'http://localhost:5173'})
+        assert local.headers['Access-Control-Allow-Origin'] == 'http://localhost:5173'
