@@ -22,6 +22,22 @@ The replacement `POST /finance/admin/institutions` requires platform administrat
 
 The institution owner creates the account and scoped membership through `POST /finance/institutions/{institution_id}/staff`. Invitation issuance, preview, redemption and acceptance are removed. Historical invitations and existing active memberships are preserved. Outstanding invitation links no longer work. This change requires no database migration.
 
+## Password recovery and sign-in controls
+
+The Farmer, Financial Institution and Super Admin sign-in screens have an eye icon inside the password field and a **Forgot password?** action. Recovery uses the account's email address. The latest link expires after 15 minutes and can succeed once. A successful reset signs the account out of existing sessions.
+
+For a recovery release, first apply Alembic revision `0031_password_recovery` to the intended database with `python -m alembic upgrade head`. Configure these private environment settings in the Render backend:
+
+| Setting | Value |
+| --- | --- |
+| `AQUAFARM_RECOVERY_ORIGIN` | `https://aquafarm-ghana-frontend.onrender.com` |
+| `AQUAFARM_RECOVERY_FROM` | Sender email on a domain verified in Resend |
+| `AQUAFARM_RECOVERY_RESEND_API_KEY` | Private Resend sending API key |
+
+After an authorized deployment, use a designated test account in each portal to request a link, confirm delivery, reset the password and verify old sessions are rejected. Repeat with an unregistered email and confirm the same on-screen message. Before mail is configured, recovery requests return an unavailable message. Email delivery is mocked in automated tests.
+
+If a release is rolled back, keep the additive columns in place. Avoid rolling back to an older backend after users have reset passwords without addressing session revocation, since older code does not enforce the new revocation checks.
+
 ## Read-only privileged account review
 
 In the Neon SQL Editor, verify that the selected branch and database are the ones used by Render. Run the following as an authorized database operator. Keep the output private.
@@ -61,7 +77,9 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Internal financial institution registration | Partially implemented |
 | Email or registered phone sign-in across all three portals | Newly implemented and locally verified |
 | Compulsory normalized mobile numbers for all accounts | Partially implemented |
-| Phone verification, login MFA, recovery and trusted devices | Not implemented |
+| Phone verification, login MFA and trusted devices | Not implemented |
+| Password recovery by email | Newly implemented and locally verified |
+| Real recovery email delivery | Blocked by external configuration |
 | Authentication SMS integration | Not implemented |
 | Farm staff creation, permissions, farm and unit assignments | Partially implemented |
 | Direct institution staff creation and role enforcement | Newly implemented and locally verified |

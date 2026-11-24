@@ -13,7 +13,7 @@ import {LoanAppraisalReport} from './loanAppraisalReport';
 import {InstitutionStaff} from './institutionStaff';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, RefreshCw, CheckCircle2, AlertTriangle, PlusCircle, Building2, Sprout, Pencil, Archive, X, LocateFixed, Camera, RotateCcw, ChevronDown, ArrowLeft, CalendarDays, ClipboardList, Droplets, TrendingUp, Package, LifeBuoy, ShoppingBasket, Users, Settings} from 'lucide-react';
+import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, RefreshCw, CheckCircle2, AlertTriangle, PlusCircle, Building2, Sprout, Pencil, Archive, X, LocateFixed, Camera, RotateCcw, ChevronDown, ArrowLeft, CalendarDays, ClipboardList, Droplets, TrendingUp, Package, LifeBuoy, ShoppingBasket, Users, Settings, Eye, EyeOff} from 'lucide-react';
 import './style.css';
 
 type Obj = Record<string, any>;
@@ -336,6 +336,14 @@ function App(){
  const [portal,setPortal]=useState<'farmer'|'institution'|'admin'>('farmer');
  const [authMode,setAuthMode]=useState<'login'|'register'>('login');const [form,setForm]=useState<Obj>({});
  const [showLoginPassword,setShowLoginPassword]=useState(false);
+ const [forgotPassword,setForgotPassword]=useState(false);
+ const [resetToken,setResetToken]=useState(()=>new URLSearchParams(window.location.hash.slice(1)).get('password-reset')??'');
+ useEffect(()=>{
+   if(!resetToken)return;
+   const target=new URLSearchParams(window.location.hash.slice(1)).get('portal');
+   if(target==='admin'||target==='institution'||target==='farmer')setPortal(target);
+   window.history.replaceState(null,'',window.location.pathname+window.location.search);
+ },[resetToken]);
  const activeCycles=cycles.filter(c=>c.status==='active');
  const dailyCycle=activeCycles.find(c=>c.cycle_id===Number(dailyCycleId));
  const selectedApprovedAmount=Number(selectedApp?.appraisals?.filter((x:Obj)=>x.decision==='approved').slice(-1)[0]?.approved_ghs??selectedApp?.requested_ghs??0);
@@ -1252,6 +1260,35 @@ function App(){
   {kind:'financial',label:'Financial analysis',description:'Recorded costs, cost per kg and recommended prices',csv:'analytics/financial.csv'},
   {kind:'bank-ready',label:'Investment-ready report',description:'Production, sales, costs, receivables and evidence caveats',csv:'bank-ready.csv'},
  ];
+ if(resetToken||(!token&&forgotPassword))return <div className="authwrap"><div className="authcard">
+   <h1>{resetToken?'Set a new password':'Forgot password'}</h1>
+   {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
+   {notice&&<div className="success" role="status">{notice}</div>}
+   <form onSubmit={async event=>{
+     event.preventDefault();setError('');setNotice('');
+     if(resetToken&&form.password!==form.confirm_password){setError('The passwords do not match.');return}
+     setBusy(true);
+     try{
+       if(resetToken){
+         const result=await json('/auth/password-recovery/reset',{token:resetToken,password:form.password});
+         sessionStorage.removeItem('aquafarm_token');
+         setToken('');setResetToken('');setForm({});setNotice(result.message);
+       }else{
+         const result=await json('/auth/password-recovery/request',{portal,email:String(form.email??'').trim()});
+         setNotice(result.message);
+       }
+     }catch(problem){setError(String(problem))}
+     finally{setBusy(false)}
+   }}>
+     {resetToken?<>{field('password','New password','password',{required:true,minLength:portal==='admin'?12:8,maxLength:128,autoComplete:'new-password'})}
+       {field('confirm_password','Confirm new password','password',{required:true,maxLength:128,autoComplete:'new-password'})}</>:
+       field('email','Account email','email',{required:true,maxLength:255,autoComplete:'email'})}
+     <button className="primary" disabled={busy}>{resetToken?'Update password':'Send reset link'}</button>
+   </form>
+   <button className="textbutton" type="button" disabled={busy} onClick={()=>{
+     setForgotPassword(false);setResetToken('');setForm({});setError('');setNotice('');
+   }}>Back to sign in</button>
+ </div></div>;
  if(!token)return <div className="authwrap"><div className="authcard">
    <div className="brand dark"><Waves size={30}/><span>AquaFarm <b>Manager Ghana</b></span></div>
    <label className="field"><span>Portal</span><select value={portal} disabled={busy} onChange={e=>{
@@ -1269,8 +1306,20 @@ function App(){
    <form onSubmit={authenticate}>
      {authMode==='register'&&field('full_name','Full Name','text',{required:true,maxLength:120,autoComplete:'name'})}
      {authMode==='register'?field('email','Email','email',{required:true,autoComplete:'email'}):field('email','Email or phone number','text',{required:true,maxLength:255,autoComplete:'username'})}
-     {field('password','Password',authMode==='login'&&showLoginPassword?'text':'password',{required:true,minLength:authMode==='register'?8:1,maxLength:128,autoComplete:authMode==='register'?'new-password':'current-password'})}
-     {authMode==='login'&&<button type="button" className="textbutton" onClick={()=>setShowLoginPassword(value=>!value)}>{showLoginPassword?'Hide password':'Show password'}</button>}
+     {authMode==='login'?<div className="field">
+       <label htmlFor="sign-in-password"><span>Password</span></label>
+       <div className="password-input">
+         <input id="sign-in-password" type={showLoginPassword?'text':'password'} required maxLength={128}
+           autoComplete="current-password" value={form.password??''} onChange={event=>setForm({...form,password:event.target.value})}/>
+         <button type="button" aria-label={showLoginPassword?'Hide password':'Show password'}
+           onClick={()=>setShowLoginPassword(value=>!value)}>
+           {showLoginPassword?<EyeOff size={18} aria-hidden="true"/>:<Eye size={18} aria-hidden="true"/>}
+         </button>
+       </div>
+     </div>:field('password','Password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
+     {authMode==='login'&&<button type="button" className="textbutton" disabled={busy} onClick={()=>{
+       setForgotPassword(true);setShowLoginPassword(false);setForm({email:String(form.email??'').includes('@')?form.email:''});setError('');setNotice('');
+     }}>Forgot password?</button>}
      {authMode==='register'&&portal==='farmer'&&<label className="field"><span>Business type</span><select value={form.business_type??'farmer'} onChange={event=>setForm({...form,business_type:event.target.value})}>
       <option value="farmer">Fish Farmer</option><option value="processor">Fish Processor</option><option value="integrated">Integrated Fish Farmer and Processor</option>
      </select></label>}

@@ -119,8 +119,11 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
   return 'Registration is temporarily unavailable. Please try again.';
  }
  const login=/^\/auth\/(?:[^/]+\/)?login$/.test(path);
+ if(path==='/auth/password-recovery/request'&&status===503)return 'Password recovery email is unavailable. Contact support.';
+ if(path==='/auth/password-recovery/reset'&&status===400)return 'This password reset link is invalid or expired. Request a new link.';
+ if(path==='/auth/password-recovery/reset'&&status===422&&detail==='Use at least 12 characters for an administrator password.')return detail;
  if(status===0)return 'Unable to connect. Please check your connection.';
- if(status===401)return login?'Incorrect username or password.':'Your session has expired. Please log in again.';
+ if(status===401)return login?'Incorrect email, phone number, or password.':'Your session has expired. Please log in again.';
  if(status===403)return 'You do not have permission to perform this action.';
  if(status===429)return 'Too many requests. Please wait and try again.';
  if(status===404)return friendlyResource(path)+' not found.';
