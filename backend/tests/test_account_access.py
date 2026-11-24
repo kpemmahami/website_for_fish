@@ -30,7 +30,7 @@ def admin_headers():
 
 
 def register_institution(email, institution):
-    response = client.post('/auth/institution/register', json={
+    response = client.post('/finance/admin/institutions', headers=admin_headers(), json={
         **credentials(email), 'institution': institution,
     })
     assert response.status_code == 201, response.text
@@ -51,10 +51,16 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
     assert client.post('/auth/admin/invitations', headers=farmer, json={'email': 'abc@example.com'}).status_code == 404
 
     institution = {'name': 'Pending Test Bank', 'institution_type': 'bank', 'account_number': 'TEST-001'}
-    assert client.post('/finance/institutions', headers=farmer, json=institution).status_code == 403
+    payload = {**credentials('unapproved-institution@example.com'), 'institution': institution}
+    assert client.post('/auth/institution/register', json=payload).status_code == 404
+    assert client.post('/finance/institutions', json=payload).status_code == 405
+    assert client.post('/finance/admin/institutions', json=payload).status_code == 401
+    assert client.post('/finance/admin/institutions', headers=farmer, json=payload).status_code == 403
+    with SessionLocal() as db:
+        assert db.scalar(select(User.id).where(User.email == payload['email'])) is None
     lender_email = 'access-lender@example.com'
     lender, response = register_institution(lender_email, institution)
-    assert client.post('/auth/institution/register', json={
+    assert client.post('/finance/admin/institutions', headers=admin_headers(), json={
         **credentials(lender_email), 'institution': institution,
     }).status_code == 409
     institution_id = response.json()['id']
@@ -93,6 +99,31 @@ def test_admin_bootstrap_and_closed_public_provisioning():
         with pytest.raises(ValueError, match='already been completed'):
             bootstrap_admin(Register(**credentials('second-bootstrap@example.com')), db)
     assert client.get('/auth/me', headers=admin).json()['is_platform_owner'] is True
+
+
+def test_institution_registration_rolls_back_partial_provisioning(monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    from app import lending
+
+    create = lending.add_institution
+
+    def fail_after_institution_creation(data, user, db):
+        create(data, user, db)
+        db.flush()
+        raise IntegrityError('test insert', {}, RuntimeError('simulated constraint failure'))
+
+    monkeypatch.setattr(lending, 'add_institution', fail_after_institution_creation)
+    email = 'rollback-institution@example.com'
+    name = 'Rollback Test Bank'
+    response = client.post('/finance/admin/institutions', headers=admin_headers(), json={
+        **credentials(email),
+        'institution': {'name': name, 'institution_type': 'bank', 'account_number': 'TEST-ROLLBACK'},
+    })
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        assert db.scalar(select(User.id).where(User.email == email)) is None
+        assert db.scalar(select(lending.Institution.id).where(lending.Institution.name == name)) is None
 
 
 def test_institution_review_and_suspension():

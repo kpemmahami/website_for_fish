@@ -10,7 +10,7 @@ import { FarmExpenses} from './farmExpenses';
 import {ErrorNotice, friendlyApiError, responseError, UserFacingError} from './apiErrors';
 import {ProductionIntelligence} from './productionIntelligence';
 import {LoanAppraisalReport} from './loanAppraisalReport';
-import {InstitutionStaff, StaffActivation, StaffInvitationInbox} from './institutionStaff';
+import {InstitutionStaff} from './institutionStaff';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, RefreshCw, CheckCircle2, AlertTriangle, PlusCircle, Building2, Sprout, Pencil, Archive, X, LocateFixed, Camera, RotateCcw, ChevronDown, ArrowLeft, CalendarDays, ClipboardList, Droplets, TrendingUp, Package, LifeBuoy, ShoppingBasket, Users, Settings} from 'lucide-react';
@@ -334,8 +334,8 @@ function App(){
  const [evidenceRetry,setEvidenceRetry]=useState<Obj|null>(null);
  const [profileForm,setProfileForm]=useState<Obj>({phone_number:'',sms_daily_records_enabled:false,sms_loan_reminders_enabled:false});
  const [portal,setPortal]=useState<'farmer'|'institution'|'admin'>('farmer');
- const [staffActivation,setStaffActivation]=useState(()=>window.location.hash.startsWith('#staff-invitation='));
  const [authMode,setAuthMode]=useState<'login'|'register'>('login');const [form,setForm]=useState<Obj>({});
+ const [showLoginPassword,setShowLoginPassword]=useState(false);
  const activeCycles=cycles.filter(c=>c.status==='active');
  const dailyCycle=activeCycles.find(c=>c.cycle_id===Number(dailyCycleId));
  const selectedApprovedAmount=Number(selectedApp?.appraisals?.filter((x:Obj)=>x.decision==='approved').slice(-1)[0]?.approved_ghs??selectedApp?.requested_ghs??0);
@@ -967,13 +967,10 @@ function App(){
    const credentials={email:identifier,password:form.password};
    try{
      if(authMode==='register'){
-       const path=`/auth/${portal}/register`;
-       const details=portal==='institution'?{
-         institution:{name:form.name,institution_type:form.institution_type,account_number:form.account_number}
-       }:{business_type:form.business_type??'farmer'};
-       await json(path,{...credentials,full_name:form.full_name,...details});
+       if(portal!=='farmer')return;
+       await json('/auth/farmer/register',{...credentials,full_name:form.full_name,business_type:form.business_type??'farmer'});
        setAuthMode('login');setForm({email:form.email});
-       setNotice(portal==='institution'?'Institution submitted for approval. Sign in to check its status.':'Account created. Sign in to continue.');
+       setNotice('Account created. Sign in to continue.');
      }else{
        const result=await json(`/auth/${portal}/login`,credentials);
        sessionStorage.setItem('aquafarm_token',result.access_token);
@@ -1255,16 +1252,10 @@ function App(){
   {kind:'financial',label:'Financial analysis',description:'Recorded costs, cost per kg and recommended prices',csv:'analytics/financial.csv'},
   {kind:'bank-ready',label:'Investment-ready report',description:'Production, sales, costs, receivables and evidence caveats',csv:'bank-ready.csv'},
  ];
- if(!token&&staffActivation)return <div className="authwrap"><div className="authcard">
-   <StaffActivation api={json} onSignIn={email=>{
-     setStaffActivation(false);setPortal('institution');setAuthMode('login');setForm({email});setNotice('Account activated. Sign in with your new password.');
-   }}/>
-   <button className="textbutton" type="button" onClick={()=>setStaffActivation(false)}>Back to sign in</button>
- </div></div>;
  if(!token)return <div className="authwrap"><div className="authcard">
    <div className="brand dark"><Waves size={30}/><span>AquaFarm <b>Manager Ghana</b></span></div>
    <label className="field"><span>Portal</span><select value={portal} disabled={busy} onChange={e=>{
-     setPortal(e.target.value as typeof portal);setAuthMode('login');setForm({});setError('');setNotice('');
+     setPortal(e.target.value as typeof portal);setAuthMode('login');setShowLoginPassword(false);setForm({});setError('');setNotice('');
    }}><option value="farmer">Farmer</option><option value="institution">Bank or financial institution</option><option value="admin">Super Admin / Platform administrator</option></select></label>
    {authMode==='login'&&(localTestPortal?<div className="workspace-tabs">
      <p className="muted">Choose a local test account to fill in its username and select its portal.</p>
@@ -1272,28 +1263,21 @@ function App(){
        setPortal(account.portal);setForm({email:account.username});setError('');setNotice('');
      }}>{account.label}</button>)}</div>
    </div>:import.meta.env.DEV&&<p className="muted">Using a seeded test account? <a href="http://127.0.0.1:5174/">Open the local test portal</a>.</p>)}
-   {portal==='institution'&&authMode==='login'&&<button type="button" className="textbutton" onClick={()=>{setStaffActivation(true);setError('')}}>Accept a staff invitation</button>}
-   <h1>{authMode==='login'?'Sign in':portal==='institution'?'Register a financial institution':'Register as a farmer'}</h1>
+   {portal==='institution'&&<p className="muted">Authorized AquaFarm Manager Ghana administrators create institution accounts.</p>}
+   <h1>{authMode==='login'?'Sign in':'Register as a farmer'}</h1>
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}{notice&&<div className="success">{notice}</div>}
    <form onSubmit={authenticate}>
      {authMode==='register'&&field('full_name','Full Name','text',{required:true,maxLength:120,autoComplete:'name'})}
      {authMode==='register'?field('email','Email','email',{required:true,autoComplete:'email'}):field('email','Username or email','text',{required:true,maxLength:255,autoComplete:'username'})}
-     {field('password','Password','password',{required:true,minLength:authMode==='register'?8:1,maxLength:128,autoComplete:authMode==='register'?'new-password':'current-password'})}
+     {field('password','Password',authMode==='login'&&showLoginPassword?'text':'password',{required:true,minLength:authMode==='register'?8:1,maxLength:128,autoComplete:authMode==='register'?'new-password':'current-password'})}
+     {authMode==='login'&&<button type="button" className="textbutton" onClick={()=>setShowLoginPassword(value=>!value)}>{showLoginPassword?'Hide password':'Show password'}</button>}
      {authMode==='register'&&portal==='farmer'&&<label className="field"><span>Business type</span><select value={form.business_type??'farmer'} onChange={event=>setForm({...form,business_type:event.target.value})}>
       <option value="farmer">Fish Farmer</option><option value="processor">Fish Processor</option><option value="integrated">Integrated Fish Farmer and Processor</option>
      </select></label>}
-     {authMode==='register'&&portal==='institution'&&<>
-       {field('name','Institution name','text',{required:true,minLength:3,maxLength:180})}
-       <label className="field"><span>Institution type</span><select required value={form.institution_type??''} onChange={e=>setForm({...form,institution_type:e.target.value})}>
-         <option value="">Choose institution type</option><option value="bank">Bank</option><option value="rural_bank">Rural bank</option>
-         <option value="microfinance">Microfinance</option><option value="credit_union">Credit union</option><option value="other">Other</option>
-       </select></label>
-       {field('account_number','Institution account reference','text',{required:true,minLength:3,maxLength:100})}
-     </>}
      <button className="primary" disabled={busy}>{busy?'Please wait?':authMode==='login'?'Sign in':'Register'}</button>
    </form>
-   {portal!=='admin'&&<button className="textbutton" disabled={busy} onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setError('');setNotice('');setForm({})}}>
-     {authMode==='register'?'Back to sign in':portal==='institution'?'Register an institution':'Create a farmer account'}
+   {portal==='farmer'&&<button className="textbutton" disabled={busy} onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setShowLoginPassword(false);setError('');setNotice('');setForm({})}}>
+     {authMode==='register'?'Back to sign in':'Create a farmer account'}
    </button>}
  </div></div>;
  if(!user)return <div className="authwrap"><div className="authcard">
@@ -1319,7 +1303,6 @@ function App(){
  {productionActivities.map(activity=><button type="button" key={activity.key} aria-current={page==='production'&&productionView===activity.key?'page':undefined} onClick={()=>openProduction(activity.key)}>{activity.label}</button>)}
  </div>
  </div>:<button key={key} className={(page===key||(page==='units'&&key==='farms')||(page==='expenses'&&key==='finance'))?'active':''} onClick={()=>{if(key==='overview'){backToDashboard();void loadFarm()}else if(key==='processing'){openProcessing()}else if(key==='sales'&&processorOnly){openProcessing('sales')}else if(key==='reports'){openReport(null)}else{setPage(key);window.history.replaceState(null,'',window.location.pathname+window.location.search)}setProductionExpanded(false);setForm({});setSelectedApp(null);setSelectedLoan(null);setNotice('')}}>{ic}{label}</button>)}</nav><div className="sidefoot"><div className="usericon">{user?.full_name?.slice(0,1)||'U'}</div><div className="who"><b>{user?.full_name||'Account'}</b><small>{user?.email||''}</small></div><button aria-label="Sign out" title="Switch account" onClick={logout}><LogOut size={18}/></button></div></aside><main className="main"><header><div><span className="eyebrow">AQUAFARM / {page.toUpperCase()}</span><h1>{page==='production'?(productionView==='landing'?'Production Management':productionActivities.find(item=>item.key===productionView)?.label):page==='units'?'Production units':page==='history'?'Farm Activity History':page==='reports'?(reports.find(([key])=>key===reportView)?.[1]??'Farm Reports & Analytics'):page==='expenses'?'Farm Expenses':nav.find(x=>x[0]===page)?.[1]}</h1></div><div className="headeractions"><button type="button" className="outline" onClick={logout}><LogOut size={16}/> Switch account</button>{page!=='lender'&&page!=='admin'&&<select aria-label="Selected farm" value={farmId??''} onChange={e=>{setFarmId(Number(e.target.value));if(page==='history')openHistory({tab:historyContext.tab})}}>{farms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}{!farms.length&&<option value="">No farms</option>}</select>}<button className="outline" onClick={()=>{void loadBase();void loadFarm();void loadUnits();void loadLender();setWorkspaceRefresh(value=>value+1)}}><RefreshCw size={16}/> Refresh</button></div></header>{error&&<div className="alert"><AlertTriangle size={17}/>{error}<button onClick={()=>setError('')}>×</button></div>}{page!=='finance'&&reminders.some(r=>r.status==='overdue')&&<div className="alert" role="status"><AlertTriangle size={17}/>{reminders.filter(r=>r.status==='overdue').length} loan instalment{reminders.filter(r=>r.status==='overdue').length===1?' is':'s are'} overdue. <button className="outline small" onClick={()=>setPage('finance')}>View repayments</button></div>}{notice&&<div className="success"><CheckCircle2 size={17}/>{notice}</div>}
- {user&&!user.is_platform_admin&&<StaffInvitationInbox api={json} refresh={loadBase}/>}
  {(page==='farms'||page==='units')&&<div className="farmactions workspace-tabs" aria-label="Farm management">
   <button className="outline" aria-pressed={page==='farms'} onClick={()=>setPage('farms')}>Farms</button>
   <button className="outline" aria-pressed={page==='units'} onClick={()=>setPage('units')}>Production units</button>
@@ -1896,6 +1879,20 @@ function App(){
  {page==='admin'&&user?.is_platform_admin&&<><section className="panel">
  <h2>Stakeholder Approvals</h2>
  <h3>Financial institutions</h3>
+ <details><summary>Register institution</summary>
+ <form className="farmform" autoComplete="off" onSubmit={e=>formSubmit(e,'/finance/admin/institutions',{
+   full_name:form.institution_admin_name,email:form.institution_admin_email,password:form.institution_admin_password,
+   institution:{name:form.institution_name,institution_type:form.institution_type,account_number:form.institution_reference}
+ },()=>setForm({}))}>
+   {field('institution_name','Official institution name','text',{required:true,minLength:3,maxLength:180})}
+   {dropdown('institution_type','Institution type',[{value:'bank',label:'Commercial bank'},{value:'rural_bank',label:'Rural or community bank'},{value:'microfinance',label:'Microfinance'},{value:'credit_union',label:'Credit union'},{value:'other',label:'Other'}])}
+   {field('institution_reference','Institution registration or account reference','text',{required:true,minLength:3,maxLength:100})}
+   {field('institution_admin_name','Initial administrator full name','text',{required:true,maxLength:120})}
+   {field('institution_admin_email','Initial administrator official email','email',{required:true})}
+   {field('institution_admin_password','Initial administrator password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
+   <button className="primary" disabled={busy}>Register institution</button>
+ </form>
+ </details>
  <div className="farmform">
  <label className="field"><span>Search institutions</span><input type="search" value={institutionReviewSearch} onChange={e=>setInstitutionReviewSearch(e.target.value)}/></label>
  <label className="field"><span>Status</span><select value={institutionReviewFilter} onChange={e=>setInstitutionReviewFilter(e.target.value)}>
@@ -1931,7 +1928,6 @@ function App(){
     {selectedInstitution?.status==='suspended'&&<div className="alert">This institution is suspended. Contact the platform administrator for review.</div>}
     {selectedInstitution?.status==='rejected'&&<div className="alert">This institution was rejected. Contact the platform administrator for review.</div>}
     {['legacy','institution'].includes(user.account_type)&&<div>
-    <h3>Register an institution</h3><form onSubmit={e=>formSubmit(e,'/finance/institutions',{name:form.name,institution_type:form.institution_type,account_number:form.account_number},()=>setForm({}))}>{field('name','Institution name','text',{required:true,minLength:3})}{dropdown('institution_type','Institution type',[{value:'bank',label:'Bank'},{value:'rural_bank',label:'Rural bank'},{value:'microfinance',label:'Microfinance'},{value:'credit_union',label:'Credit union'},{value:'other',label:'Other'}])}{field('account_number','Account number','text',{required:true,minLength:3})}<button className="primary" disabled={busy}><Building2 size={17}/> Register institution</button></form>
 
     <p className="footnote">New institutions require platform administrator verification before lender operations.</p>
     </div>}

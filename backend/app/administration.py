@@ -1,5 +1,4 @@
 ﻿"""Platform administrator provisioning and ownership checks."""
-import hashlib
 from datetime import datetime
 
 from fastapi import HTTPException
@@ -41,10 +40,6 @@ def bootstrap_admin(data: AdminRegister, db: Session) -> None:
     except IntegrityError as exc:
         db.rollback()
         raise ValueError('Setup already completed or email already registered') from exc
-
-
-def token_digest(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def is_platform_owner(user: User, db: Session) -> bool:

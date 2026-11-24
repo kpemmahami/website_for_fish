@@ -487,22 +487,15 @@ def add_institution(data, user, db):
     return institution
 
 
-@app.post('/finance/institutions', status_code=201, tags=['Financial institutions and loan appraisal'])
-def create_institution(data: InstitutionIn, user: CurrentUser, db: Db):
-    if user.account_type not in ('legacy', 'institution'):
-        raise HTTPException(403, 'Institution account required')
-    institution = add_institution(data, user, db)
-    db.commit()
-    return institution_view(institution)
-
-
-@app.post('/auth/institution/register', status_code=201)
-def register_institution(data: InstitutionRegistration, db: Db):
+@app.post('/finance/admin/institutions', status_code=201, tags=['Financial institutions and loan appraisal'])
+def register_institution(data: InstitutionRegistration, administrator: CurrentUser, db: Db):
+    require_platform_admin(administrator)
     user = new_user(data, 'institution')
     db.add(user)
     try:
         db.flush()
         institution = add_institution(data.institution, user, db)
+        audit(db, administrator, 'provision', 'finance_institution', institution.id)
         db.commit()
     except IntegrityError:
         db.rollback()
