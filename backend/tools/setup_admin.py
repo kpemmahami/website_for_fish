@@ -10,6 +10,7 @@ from app.main import AdminRegister, SessionLocal
 def main():
     name = input('Administrator full name: ')
     email = input('Administrator email: ')
+    phone = input('Administrator mobile phone number: ')
     password = getpass('Administrator password: ')
     if password != getpass('Confirm administrator password: '):
         raise SystemExit('Passwords differ')
@@ -20,7 +21,7 @@ def main():
         raise SystemExit(f'Invalid administrator fields: {fields}') from None
     with SessionLocal() as db:
         try:
-            bootstrap_admin(data, db)
+            bootstrap_admin(data, db, phone_number=phone)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
     print('First platform administrator created.')

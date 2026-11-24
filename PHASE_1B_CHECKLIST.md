@@ -26,7 +26,18 @@ The institution owner creates the account and scoped membership through `POST /f
 
 The Farmer, Financial Institution and Super Admin sign-in screens have an eye icon inside the password field and a **Forgot password?** action. Recovery uses the account's email address. The latest link expires after 15 minutes and can succeed once. A successful reset signs the account out of existing sessions.
 
-For a recovery release, first apply Alembic revision `0031_password_recovery` to the intended database with `python -m alembic upgrade head`. Configure these private environment settings in the Render backend:
+For a recovery release, apply Alembic revision `0031_password_recovery` to the intended database first. From the Windows workspace root:
+
+```powershell
+Push-Location .\aquafarm-manager\backend
+try {
+    & ..\..\.venv\Scripts\python.exe -m tools.migrate_password_recovery
+} finally {
+    Pop-Location
+}
+```
+
+Paste the Neon URL at the hidden prompt. Compare the displayed host and database with the production Render configuration before confirming. The helper accepts revisions `0030` and `0031`, applies only `0031`, and verifies both new columns. Configure these private environment settings in the Render backend:
 
 | Setting | Value |
 | --- | --- |
@@ -39,6 +50,10 @@ After an authorized deployment, use a designated test account in each portal to 
 If a release is rolled back, keep the additive columns in place. Avoid rolling back to an older backend after users have reset passwords without addressing session revocation, since older code does not enforce the new revocation checks.
 
 ## Read-only privileged account review
+
+The Platform Owner can open **Super Admin → Manage administrators** to search and page through administrators. The directory lists role, contact details, and creation date. The server denies access to ordinary Super Admins. Account creation, suspension and permission changes remain pending.
+
+For a new local Platform Owner, run `..\..\.venv\Scripts\python.exe -m tools.setup_admin` from `aquafarm-manager\backend` after migrating the intended local database. The command requests name, email, mobile number and hidden password confirmation. With `DATABASE_URL` unset, it uses the local backend SQLite database. For a hosted bootstrap, verify the target and obtain explicit authorization first. The command preserves an existing owner and does not promote an account.
 
 In the Neon SQL Editor, verify that the selected branch and database are the ones used by Render. Run the following as an authorized database operator. Keep the output private.
 
@@ -72,6 +87,7 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Farmer registration and existing email login | Already implemented and verified |
 | Farmer approval, Super Admin dashboard and permissions | Partially implemented |
 | Bootstrap administrator and owner designation | Partially implemented |
+| Owner-only administrator directory | Newly implemented and locally verified |
 | Public Super Admin provisioning blocked | Verified on the hosted website |
 | Internal administrator creation and recovery | Not implemented |
 | Internal financial institution registration | Partially implemented |

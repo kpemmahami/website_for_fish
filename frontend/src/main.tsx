@@ -11,6 +11,7 @@ import {ErrorNotice, friendlyApiError, responseError, UserFacingError} from './a
 import {ProductionIntelligence} from './productionIntelligence';
 import {LoanAppraisalReport} from './loanAppraisalReport';
 import {InstitutionStaff} from './institutionStaff';
+import {AdministratorDirectory} from './administratorDirectory';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, RefreshCw, CheckCircle2, AlertTriangle, PlusCircle, Building2, Sprout, Pencil, Archive, X, LocateFixed, Camera, RotateCcw, ChevronDown, ArrowLeft, CalendarDays, ClipboardList, Droplets, TrendingUp, Package, LifeBuoy, ShoppingBasket, Users, Settings, Eye, EyeOff} from 'lucide-react';
@@ -1925,7 +1926,9 @@ function App(){
     harvests={harvestSchedule.filter(row=>row.farm_id===farmId)} load={json} open={openUnitActivity} pricingDownload={downloadPricingPdf}/>}
   </details>}
  </>}
- {page==='admin'&&user?.is_platform_admin&&<><section className="panel">
+ {page==='admin'&&user?.is_platform_admin&&<>
+ {user.is_platform_owner&&<AdministratorDirectory load={json}/>}
+ <section className="panel">
  <h2>Stakeholder Approvals</h2>
  <h3>Financial institutions</h3>
  <details><summary>Register institution</summary>

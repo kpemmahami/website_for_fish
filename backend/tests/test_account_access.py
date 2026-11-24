@@ -58,7 +58,7 @@ def test_duplicate_phone_requires_email_login():
 def admin_headers():
     with SessionLocal() as db:
         if db.get(AdminSetup, 1) is None:
-            bootstrap_admin(Register(**credentials(ADMIN_EMAIL)), db)
+            bootstrap_admin(Register(**credentials(ADMIN_EMAIL)), db, phone_number='0271234567')
     return login('admin', ADMIN_EMAIL)
 
 
@@ -130,8 +130,27 @@ def test_admin_bootstrap_and_closed_public_provisioning():
     with SessionLocal() as db:
         assert db.scalar(select(User.id).where(User.email == email)) is None
         with pytest.raises(ValueError, match='already been completed'):
-            bootstrap_admin(Register(**credentials('second-bootstrap@example.com')), db)
+            bootstrap_admin(Register(**credentials('second-bootstrap@example.com')), db, phone_number='0281234567')
     assert client.get('/auth/me', headers=admin).json()['is_platform_owner'] is True
+
+
+def test_administrator_directory_is_owner_only():
+    owner = admin_headers()
+    email = 'directory-admin@example.com'
+    with SessionLocal.begin() as db:
+        db.add(new_user(Register(**credentials(email)), 'admin'))
+    path = '/admin/administrators'
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers=login('admin', email)).status_code == 403
+    match = client.get(path, headers=owner, params={'search': 'DIRECTORY-ADMIN'}).json()
+    assert match['total'] == 1
+    assert match['items'][0]['role'] == 'Super Admin'
+    assert match['items'][0]['email'] == email
+    assert 'password_hash' not in match['items'][0]
+    assert client.get(path, headers=owner, params={'search': '%'}).json()['total'] == 0
+    owner_row = client.get(path, headers=owner, params={'search': ADMIN_EMAIL, 'limit': 1}).json()['items'][0]
+    assert owner_row['role'] == 'Platform Owner'
+    assert owner_row['phone_number'] == '+233271234567'
 
 
 def test_institution_registration_rolls_back_partial_provisioning(monkeypatch):
