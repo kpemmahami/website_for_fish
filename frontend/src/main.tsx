@@ -269,7 +269,7 @@ function App(){
  const [applicationVideo,setApplicationVideo]=useState<RecordedVideo|null>(null);const [applicationEvidenceId,setApplicationEvidenceId]=useState<number|null>(null);
  const [transactionVideo,setTransactionVideo]=useState<RecordedVideo|null>(null);const [transactionEvidenceId,setTransactionEvidenceId]=useState<number|null>(null);
  const [applicationRecorderKey,setApplicationRecorderKey]=useState(0);const [transactionRecorderKey,setTransactionRecorderKey]=useState(0);
- const [inviteEmail,setInviteEmail]=useState('');const [adminInvite,setAdminInvite]=useState<Obj|null>(null);const [error,setError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);
+ const [error,setError]=useState('');const [notice,setNotice]=useState('');const [busy,setBusy]=useState(false);
  const [units,setUnits]=useState<Obj[]>([]);
  const [unitEditing,setUnitEditing]=useState<number|null>(null);
  const [unitForm,setUnitForm]=useState<Obj>({unit_type:'pond'});
@@ -967,8 +967,8 @@ function App(){
    const credentials={email:identifier,password:form.password};
    try{
      if(authMode==='register'){
-       const path=portal==='admin'?'/auth/admin/accept-invitation':`/auth/${portal}/register`;
-       const details=portal==='admin'?{invitation_token:form.invitation_token}:portal==='institution'?{
+       const path=`/auth/${portal}/register`;
+       const details=portal==='institution'?{
          institution:{name:form.name,institution_type:form.institution_type,account_number:form.account_number}
        }:{business_type:form.business_type??'farmer'};
        await json(path,{...credentials,full_name:form.full_name,...details});
@@ -981,11 +981,6 @@ function App(){
        setForm({});setToken(result.access_token);
      }
    }catch(e){setError(String(e))}finally{setBusy(false)}
- }
- async function inviteAdministrator(e:React.FormEvent){
-   e.preventDefault();setBusy(true);setError('');setAdminInvite(null);
-   try{setAdminInvite(await json('/auth/admin/invitations',{email:inviteEmail}));setInviteEmail('')}
-   catch(e){setError(String(e))}finally{setBusy(false)}
  }
  function logout(){sessionStorage.removeItem('aquafarm_token');window.location.reload()}
  async function openApp(id:number){try{setSelectedApp(await json(`/finance/institutions/${institutionId}/applications/${id}`));setForm({});setCustomSchedule([{due_on:'',principal_ghs:'',interest_ghs:'',fees_ghs:''}]);setError('')}catch(e){setError(String(e))}}
@@ -1278,16 +1273,15 @@ function App(){
      }}>{account.label}</button>)}</div>
    </div>:import.meta.env.DEV&&<p className="muted">Using a seeded test account? <a href="http://127.0.0.1:5174/">Open the local test portal</a>.</p>)}
    {portal==='institution'&&authMode==='login'&&<button type="button" className="textbutton" onClick={()=>{setStaffActivation(true);setError('')}}>Accept a staff invitation</button>}
-   <h1>{authMode==='login'?'Sign in':portal==='admin'?'Accept administrator invitation':portal==='institution'?'Register a financial institution':'Register as a farmer'}</h1>
+   <h1>{authMode==='login'?'Sign in':portal==='institution'?'Register a financial institution':'Register as a farmer'}</h1>
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}{notice&&<div className="success">{notice}</div>}
    <form onSubmit={authenticate}>
      {authMode==='register'&&field('full_name','Full Name','text',{required:true,maxLength:120,autoComplete:'name'})}
      {authMode==='register'?field('email','Email','email',{required:true,autoComplete:'email'}):field('email','Username or email','text',{required:true,maxLength:255,autoComplete:'username'})}
-     {field('password','Password','password',{required:true,minLength:authMode==='register'?(portal==='admin'?12:8):1,maxLength:128,autoComplete:authMode==='register'?'new-password':'current-password'})}
+     {field('password','Password','password',{required:true,minLength:authMode==='register'?8:1,maxLength:128,autoComplete:authMode==='register'?'new-password':'current-password'})}
      {authMode==='register'&&portal==='farmer'&&<label className="field"><span>Business type</span><select value={form.business_type??'farmer'} onChange={event=>setForm({...form,business_type:event.target.value})}>
       <option value="farmer">Fish Farmer</option><option value="processor">Fish Processor</option><option value="integrated">Integrated Fish Farmer and Processor</option>
      </select></label>}
-     {authMode==='register'&&portal==='admin'&&field('invitation_token','Invitation token','password',{required:true,minLength:43,maxLength:43})}
      {authMode==='register'&&portal==='institution'&&<>
        {field('name','Institution name','text',{required:true,minLength:3,maxLength:180})}
        <label className="field"><span>Institution type</span><select required value={form.institution_type??''} onChange={e=>setForm({...form,institution_type:e.target.value})}>
@@ -1296,11 +1290,11 @@ function App(){
        </select></label>
        {field('account_number','Institution account reference','text',{required:true,minLength:3,maxLength:100})}
      </>}
-     <button className="primary" disabled={busy}>{busy?'Please wait?':authMode==='login'?'Sign in':portal==='admin'?'Accept invitation':'Register'}</button>
+     <button className="primary" disabled={busy}>{busy?'Please wait?':authMode==='login'?'Sign in':'Register'}</button>
    </form>
-   <button className="textbutton" disabled={busy} onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setError('');setNotice('');setForm({})}}>
-     {authMode==='register'?'Back to sign in':portal==='admin'?'Accept an invitation':portal==='institution'?'Register an institution':'Create a farmer account'}
-   </button>
+   {portal!=='admin'&&<button className="textbutton" disabled={busy} onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setError('');setNotice('');setForm({})}}>
+     {authMode==='register'?'Back to sign in':portal==='institution'?'Register an institution':'Create a farmer account'}
+   </button>}
  </div></div>;
  if(!user)return <div className="authwrap"><div className="authcard">
    {error?<><div className="alert">{error}</div><button onClick={logout}>Return to sign in</button></>:<p role="status">Loading your workspace?</p>}
@@ -1925,12 +1919,7 @@ function App(){
  })}
  <button className="outline" type="button" onClick={()=>void loadBase()}>Refresh institutions</button>
  </section>
- {user.is_platform_owner&&<section className="panel"><h2>Invite an administrator</h2>
-   <form onSubmit={inviteAdministrator}><label className="field"><span>Invitee email</span><input type="email" required value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)}/></label>
-   <button className="primary" disabled={busy}>Create invitation</button></form>
-   {adminInvite&&<div className="infobox"><label className="field"><span>One-time invitation token</span><input readOnly value={adminInvite.invitation_token} onFocus={e=>e.target.select()}/></label>
-   <p>Share privately with the invitee. Expires {new Date(adminInvite.expires_at).toLocaleString()}.</p></div>}
- </section>}</>}
+</>}
  {page==='lender'&&<>
   <div className="twocol">
    <section className="panel">

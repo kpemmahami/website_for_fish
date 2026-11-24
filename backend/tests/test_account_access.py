@@ -1,13 +1,12 @@
 ﻿"""Account separation and administrator provisioning regression coverage."""
 import json
-from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from .test_api import client
-from app.administration import AdminInvitation, AdminSetup, bootstrap_admin, token_digest
-from app.main import AuditLog, Register, SessionLocal
+from app.administration import AdminSetup, bootstrap_admin
+from app.main import AuditLog, Register, SessionLocal, User
 
 PASSWORD = 'a-very-long-password-123'
 ADMIN_EMAIL = 'bootstrap-admin@example.com'
@@ -49,7 +48,7 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
     farmer = login('farmer', email)
     assert client.post('/auth/admin/login', json={'email': email, 'password': PASSWORD}).status_code == 401
     assert client.get('/finance/admin/institutions/pending', headers=farmer).status_code == 403
-    assert client.post('/auth/admin/invitations', headers=farmer, json={'email': 'abc@example.com'}).status_code == 403
+    assert client.post('/auth/admin/invitations', headers=farmer, json={'email': 'abc@example.com'}).status_code == 404
 
     institution = {'name': 'Pending Test Bank', 'institution_type': 'bank', 'account_number': 'TEST-001'}
     assert client.post('/finance/institutions', headers=farmer, json=institution).status_code == 403
@@ -81,35 +80,20 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
         assert json.loads(log.details)['reason'] == 'Registration could not be verified'
 
 
-def test_admin_bootstrap_and_single_use_invitations():
+def test_admin_bootstrap_and_closed_public_provisioning():
     admin = admin_headers()
-    email = 'invited-admin@example.com'
+    email = 'unprovisioned-admin@example.com'
+    for headers in ({}, admin):
+        assert client.post('/auth/admin/invitations', headers=headers, json={'email': email}).status_code == 404
+        for path in ('/auth/admin/accept-invitation', '/auth/admin/register', '/auth/platform-owner/register'):
+            payload = {**credentials(email), 'invitation_token': 'A' * 43}
+            assert client.post(path, headers=headers, json=payload).status_code == 404
     with SessionLocal() as db:
+        assert db.scalar(select(User.id).where(User.email == email)) is None
         with pytest.raises(ValueError, match='already been completed'):
             bootstrap_admin(Register(**credentials('second-bootstrap@example.com')), db)
-    expired = client.post('/auth/admin/invitations', headers=admin, json={'email': email}).json()
-    with SessionLocal() as db:
-        db.execute(update(AdminInvitation).where(
-            AdminInvitation.token_hash == token_digest(expired['invitation_token']),
-        ).values(expires_at=datetime.now(timezone.utc) - timedelta(minutes=1)))
-        db.commit()
-    assert client.post('/auth/admin/accept-invitation', json={
-        **credentials(email), 'invitation_token': expired['invitation_token'],
-    }).status_code == 400
-    invitation = client.post('/auth/admin/invitations', headers=admin, json={'email': email})
-    assert invitation.status_code == 201, invitation.text
-    token = invitation.json()['invitation_token']
-    assert client.post('/auth/admin/accept-invitation', json={
-        **credentials('wrong-invitee@example.com'), 'invitation_token': token,
-    }).status_code == 400
-    acceptance = {**credentials(email), 'invitation_token': token}
-    assert client.post('/auth/admin/accept-invitation', json=acceptance).status_code == 201
-    assert client.post('/auth/admin/accept-invitation', json=acceptance).status_code == 400
-    delegated = login('admin', email)
-    assert client.get('/finance/admin/institutions/pending', headers=delegated).status_code == 200
     assert client.get('/auth/me', headers=admin).json()['is_platform_owner'] is True
-    assert client.get('/auth/me', headers=delegated).json()['is_platform_owner'] is False
-    assert client.post('/auth/admin/invitations', headers=delegated, json={'email': 'escalation@example.com'}).status_code == 403
+
 
 def test_institution_review_and_suspension():
     lender, registered = register_institution('review-lender@example.com', {
