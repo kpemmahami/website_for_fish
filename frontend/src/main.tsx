@@ -1268,7 +1268,7 @@ function App(){
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}{notice&&<div className="success">{notice}</div>}
    <form onSubmit={authenticate}>
      {authMode==='register'&&field('full_name','Full Name','text',{required:true,maxLength:120,autoComplete:'name'})}
-     {authMode==='register'?field('email','Email','email',{required:true,autoComplete:'email'}):field('email','Username or email','text',{required:true,maxLength:255,autoComplete:'username'})}
+     {authMode==='register'?field('email','Email','email',{required:true,autoComplete:'email'}):field('email','Email or phone number','text',{required:true,maxLength:255,autoComplete:'username'})}
      {field('password','Password',authMode==='login'&&showLoginPassword?'text':'password',{required:true,minLength:authMode==='register'?8:1,maxLength:128,autoComplete:authMode==='register'?'new-password':'current-password'})}
      {authMode==='login'&&<button type="button" className="textbutton" onClick={()=>setShowLoginPassword(value=>!value)}>{showLoginPassword?'Hide password':'Show password'}</button>}
      {authMode==='register'&&portal==='farmer'&&<label className="field"><span>Business type</span><select value={form.business_type??'farmer'} onChange={event=>setForm({...form,business_type:event.target.value})}>

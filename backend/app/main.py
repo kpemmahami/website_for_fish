@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -317,14 +318,31 @@ def register(data: FarmerRegister, db: Db):
     return response
 
 
+def login_phone_number(identifier: str) -> str | None:
+    number = re.sub(r'[\s().-]', '', identifier)
+    if re.fullmatch(r'0[0-9]{9}', number):
+        number = '+233' + number[1:]
+    elif re.fullmatch(r'233[0-9]{9}', number):
+        number = '+' + number
+    return number if re.fullmatch(r'\+[1-9][0-9]{7,14}', number) else None
+
+
 def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token:
     from .development import DEVELOPMENT_ACCOUNTS, enabled, seeded_account
 
     identifier = data.email.lower()
-    email = DEVELOPMENT_ACCOUNTS.get(identifier, identifier) if enabled(DATABASE_URL) else identifier
-    user = db.scalar(select(User).where(User.email == email))
-    if user is not None and email in DEVELOPMENT_ACCOUNTS.values():
-        if seeded_account(db, user.id) and not enabled(DATABASE_URL):
+    local_test = enabled(DATABASE_URL)
+    email = DEVELOPMENT_ACCOUNTS.get(identifier, identifier) if local_test else identifier
+    phone = login_phone_number(identifier)
+    if phone is not None:
+        matches = db.scalars(select(User).where(
+            User.phone_number == phone, User.account_type.in_(account_types),
+        ).limit(2)).all()
+        user = matches[0] if len(matches) == 1 else None
+    else:
+        user = db.scalar(select(User).where(User.email == email))
+    if user is not None and user.email in DEVELOPMENT_ACCOUNTS.values():
+        if seeded_account(db, user.id) and not local_test:
             raise HTTPException(status_code=401, detail='Invalid credentials')
         if identifier in DEVELOPMENT_ACCOUNTS and not seeded_account(db, user.id):
             raise HTTPException(status_code=401, detail='Invalid credentials')

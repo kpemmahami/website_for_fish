@@ -59,7 +59,8 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Public Super Admin provisioning blocked | Verified on the hosted website |
 | Internal administrator creation and recovery | Not implemented |
 | Internal financial institution registration | Partially implemented |
-| Compulsory normalized mobile numbers and phone login | Not implemented |
+| Email or registered phone sign-in across all three portals | Newly implemented and locally verified |
+| Compulsory normalized mobile numbers for all accounts | Partially implemented |
 | Phone verification, login MFA, recovery and trusted devices | Not implemented |
 | Authentication SMS integration | Not implemented |
 | Farm staff creation, permissions, farm and unit assignments | Partially implemented |

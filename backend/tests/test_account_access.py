@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from .test_api import client
 from app.administration import AdminSetup, bootstrap_admin
-from app.main import AuditLog, Register, SessionLocal, User
+from app.main import AuditLog, Register, SessionLocal, User, new_user
 
 PASSWORD = 'a-very-long-password-123'
 ADMIN_EMAIL = 'bootstrap-admin@example.com'
@@ -20,6 +20,39 @@ def login(portal, email):
     response = client.post(f'/auth/{portal}/login', json={'email': email, 'password': PASSWORD})
     assert response.status_code == 200, response.text
     return {'Authorization': f"Bearer {response.json()['access_token']}"}
+
+
+@pytest.mark.parametrize(('portal', 'phone', 'identifiers'), [
+    ('farmer', '+233241234567', ('0241234567', '233241234567', '+233 24 123 4567')),
+    ('institution', '+442079460123', ('+44 (20) 7946-0123',)),
+    ('admin', '+233201234567', ('0201234567',)),
+])
+def test_sign_in_by_email_or_registered_phone(portal, phone, identifiers):
+    email = f'phone-login-{portal}@example.com'
+    with SessionLocal.begin() as db:
+        user = new_user(Register(**credentials(email)), portal)
+        user.phone_number = phone
+        db.add(user)
+        db.flush()
+        user_id = user.id
+    for identifier in (*identifiers, phone, email):
+        assert client.get('/auth/me', headers=login(portal, identifier)).json()['id'] == user_id
+    assert client.post(f'/auth/{portal}/login', json={'email': phone, 'password': 'incorrect'}).status_code == 401
+    wrong_portal = 'farmer' if portal != 'farmer' else 'institution'
+    assert client.post(f'/auth/{wrong_portal}/login', json={'email': phone, 'password': PASSWORD}).status_code == 401
+
+
+def test_duplicate_phone_requires_email_login():
+    phone = '+233261234567'
+    emails = ['duplicate-phone-first@example.com', 'duplicate-phone-second@example.com']
+    with SessionLocal.begin() as db:
+        for email in emails:
+            user = new_user(Register(**credentials(email)), 'farmer')
+            user.phone_number = phone
+            db.add(user)
+    response = client.post('/auth/farmer/login', json={'email': phone, 'password': PASSWORD})
+    assert response.status_code == 401
+    assert client.get('/auth/me', headers=login('farmer', emails[0])).json()['email'] == emails[0]
 
 
 def admin_headers():
