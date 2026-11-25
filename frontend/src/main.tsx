@@ -12,6 +12,7 @@ import {ProductionIntelligence} from './productionIntelligence';
 import {LoanAppraisalReport} from './loanAppraisalReport';
 import {InstitutionStaff} from './institutionStaff';
 import {AdministratorDirectory} from './administratorDirectory';
+import {AdministratorAuthenticator} from './administratorAuthenticator';
 import {FarmerApprovals} from './farmerApprovals';
 import {PhoneReplacement, PhoneVerification} from './phoneVerification';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
@@ -343,7 +344,7 @@ function App(){
  const [resetToken,setResetToken]=useState(()=>new URLSearchParams(window.location.hash.slice(1)).get('password-reset')??'');
  const [administratorContactToken,setAdministratorContactToken]=useState(
    ()=>new URLSearchParams(window.location.hash.slice(1)).get('administrator-contact')??'');
- const [adminEnrollment,setAdminEnrollment]=useState<{enrollment_token:string;setup_key:string;account_email:string}|null>(null);
+ const [adminEnrollment,setAdminEnrollment]=useState<{enrollment_token:string;setup_key:string;account_email:string;existing_account:boolean}|null>(null);
  const [needsAuthenticator,setNeedsAuthenticator]=useState(false);
  const [initialPasswordToken,setInitialPasswordToken]=useState('');
  const [institutionSetupDestination,setInstitutionSetupDestination]=useState('');
@@ -1334,6 +1335,10 @@ function App(){
      setBusy(true);
      try{
        const result=await json('/auth/admin/activate',{token:adminEnrollment.enrollment_token,code:form.authenticator_code,password:form.password});
+       if(adminEnrollment.existing_account){
+         sessionStorage.removeItem('aquafarm_token');
+         setToken('');setUser(null);
+       }
        setPortal('admin');setForm({email:adminEnrollment.account_email});setNotice(result.message);
        setAdminEnrollment(null);
      }catch(problem){setError(String(problem))}
@@ -2060,7 +2065,11 @@ function App(){
   </details>}
  </>}
  {page==='admin'&&user?.is_platform_admin&&<>
- <section className="panel">{phoneVerification}</section>
+ <section className="panel">
+   {phoneVerification}
+   <AdministratorAuthenticator phone={user.phone_number??null} enrolled={Boolean(user.authenticator_enrolled)}
+     send={password=>json('/auth/admin/authenticator-enrollment',{password})}/>
+ </section>
  <FarmerApprovals load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>
  {user.is_platform_owner&&<AdministratorDirectory load={json}
    prepare={details=>json('/admin/administrators',details)}

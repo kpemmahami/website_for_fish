@@ -57,7 +57,9 @@ The Platform Owner can open **Super Admin → Manage administrators** to search 
 
 Revision `0033_admin_contact_proof` adds the verification challenge and authenticator state table. The owner selects **Send verification** for a pending account. The recipient opens the link sent to their email and enters the six-digit code sent to their phone. Challenges expire in ten minutes, allow five attempts, and require a two-minute wait before another send. A new send replaces the old challenge.
 
-After verifying both contacts, the recipient adds the displayed key to a time-based authenticator app, chooses a private password, and submits an authenticator code. On sign-in, enter the email or phone and password, then supply a fresh code when prompted. Codes used for activation or sign-in cannot be reused. Existing administrators retain their current sign-in flow. Their MFA enrollment and an audited lost-authenticator recovery process are pending.
+After verifying both contacts, the recipient adds the displayed key to a time-based authenticator app, chooses a private password, and submits an authenticator code. On sign-in, enter the email or phone and password, then supply a fresh code when prompted. Codes used for activation or sign-in cannot be reused.
+
+Existing Platform Owners and Super Admins with a saved number can also use **Set up administrator authenticator** in their dashboard. They enter their current password, verify their email and phone, then set a private password and add the authenticator. Existing sessions are revoked when enrollment completes. This is opt-in for legacy accounts. Mandatory rollout and lost-authenticator recovery remain pending.
 
 Live testing requires the existing Resend configuration and the backend secrets `HUBTEL_CLIENT_ID`, `HUBTEL_CLIENT_SECRET`, `HUBTEL_SMS_SENDER_ID`, and `AQUAFARM_ADMIN_AUTHENTICATOR_KEY`. Generate the authenticator key from at least 32 random bytes and keep it in Render's backend settings and secure backup. Changing it invalidates enrolled authenticators. Use fictional accounts and mocked delivery for automated tests.
 
@@ -116,7 +118,8 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Required phone enrollment for farm staff and legacy profile completion | Partially implemented |
 | Duplicate phone prevention on new assignments and legacy conflict review | Newly implemented and locally verified |
 | Authenticator enrollment and login MFA for newly provisioned administrators | Newly implemented and locally verified |
-| Existing administrator MFA enrollment and authenticator recovery | Not implemented |
+| Opt-in authenticator enrollment for existing administrators | Newly implemented and locally verified |
+| Mandatory existing-administrator MFA rollout and authenticator recovery | Not implemented |
 | Verification of a saved mobile number by SMS | Newly implemented and locally verified |
 | Verified phone replacement for farmer and institution accounts | Newly implemented and locally verified |
 | Privileged and lost-phone recovery, trusted devices | Not implemented |
@@ -138,7 +141,7 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 
 Keep the remaining web and backend work on the development branch. When the batch is ready, test the full Alembic upgrade from the production revision on an isolated PostgreSQL database, then apply the reviewed chain in one production upgrade and deploy once. Keep Flutter release work separate.
 
-The remaining account security work includes privileged and lost-phone recovery, existing-administrator authenticator enrollment and recovery, ongoing institution MFA, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
+The remaining account security work includes privileged and lost-phone recovery, mandatory existing-administrator MFA rollout and authenticator recovery, ongoing institution MFA, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
 
 New farmer and processor signup requires a phone number. The web form and Flutter source send it, so release a compatible Flutter build alongside the backend if users register through the mobile app. Existing accounts keep email sign-in. Ghanaian local, country-code, and international input are normalized by the same service as phone sign-in. This change validates formatting. Ownership verification and conflict handling have separate rollout steps.
 

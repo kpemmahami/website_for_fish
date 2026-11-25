@@ -164,6 +164,7 @@ class UserOut(BaseModel):
     account_type: Literal['legacy', 'farmer', 'pending_farmer', 'institution', 'admin']
     is_platform_admin: bool = False
     is_platform_owner: bool = False
+    authenticator_enrolled: bool = False
 
 class ContactUpdate(BaseModel):
     phone_number: PhoneNumber | None = None
@@ -350,6 +351,7 @@ async def safe_registration_validation(request: Request, error: RequestValidatio
         FARMER_REGISTRATION_PATHS | {
             '/auth/institution/initial-password', '/auth/me/phone-verification/confirm',
             '/auth/institution/initial-password/verification',
+            '/auth/admin/authenticator-enrollment',
             '/auth/me/phone-replacement/request', '/auth/me/phone-replacement/confirm',
         }
     ):
@@ -530,9 +532,12 @@ def require_platform_admin(user: User):
 @app.get('/auth/me', response_model=UserOut)
 def me(user: AuthenticatedUser, db: Db):
     from .administration import is_platform_owner
+    from .administrator_verification import AdministratorContactProof
 
+    proof = db.get(AdministratorContactProof, user.id) if user.is_platform_admin else None
     return UserOut.model_validate(user).model_copy(update={
         'is_platform_owner': is_platform_owner(user, db),
+        'authenticator_enrolled': proof is not None and proof.last_authenticator_step is not None,
     })
 
 @app.patch('/auth/me', response_model=UserOut)

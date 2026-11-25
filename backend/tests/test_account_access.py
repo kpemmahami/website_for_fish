@@ -280,6 +280,50 @@ def test_only_owner_can_prepare_an_administrator_without_granting_access(monkeyp
     assert client.post('/auth/admin/login', json=with_code).status_code == 401
 
 
+def test_existing_administrator_enrollment_revokes_old_sessions(monkeypatch):
+    from urllib.parse import parse_qs
+
+    from app import administrator_verification as verification
+
+    email = 'existing-mfa-enrollment@example.com'
+    phone = next_test_phone()
+    with SessionLocal.begin() as db:
+        user = new_user(Register(**credentials(email)), 'admin')
+        user.phone_number = phone
+        db.add(user)
+
+    logged_in = login('admin', email)
+    route = '/auth/admin/authenticator-enrollment'
+    assert client.post(route, headers=logged_in, json={'password': 'incorrect'}).status_code == 403
+    emails, messages = [], []
+    monkeypatch.setenv('AQUAFARM_ADMIN_AUTHENTICATOR_KEY', 'fictional-authenticator-key-for-tests')
+    monkeypatch.setattr(verification, 'recovery_mail_settings', lambda: ('mock', 'test@example.com', 'https://example.com'))
+    monkeypatch.setattr(verification, 'send_account_email', lambda *args: emails.append(args) or True)
+    monkeypatch.setattr(verification, 'hubtel_send_sms', lambda *args: messages.append(args))
+    assert client.post(route, headers=logged_in, json={'password': PASSWORD}).status_code == 200
+    assert client.get('/auth/me', headers=logged_in).json()['authenticator_enrolled'] is False
+    login('admin', email)
+    assert emails[0][1] == email and messages[0][0] == phone
+    token = parse_qs(emails[0][-1])['administrator-contact'][0]
+    code = messages[0][1].split(': ')[1].split('.')[0]
+    proof = client.post('/auth/admin/contact-verification', json={'token': token, 'code': code}).json()
+    assert proof['existing_account'] is True
+    monkeypatch.setattr(verification, 'matching_step', lambda *args: 100)
+    private_password = 'Replacement administrator password'
+    assert client.post('/auth/admin/activate', json={
+        'token': proof['enrollment_token'], 'password': private_password, 'code': '654321',
+    }).status_code == 200
+    assert client.get('/auth/me', headers=logged_in).status_code == 401
+    sign_in = {'email': email, 'password': private_password}
+    assert client.post('/auth/admin/login', json=sign_in).status_code == 428
+    monkeypatch.setattr(verification, 'matching_step', lambda *args: 101)
+    session = client.post('/auth/admin/login', json={**sign_in, 'authenticator_code': '123456'}).json()
+    headers = {'Authorization': f"Bearer {session['access_token']}"}
+    profile = client.get('/auth/me', headers=headers).json()
+    assert profile['authenticator_enrolled'] and profile['account_type'] == 'admin'
+    assert client.post(route, headers=headers, json={'password': private_password}).status_code == 409
+
+
 def test_owner_controls_administrator_access_and_invalidates_sessions():
     owner = admin_headers()
     email = 'managed-administrator@example.com'

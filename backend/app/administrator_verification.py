@@ -14,7 +14,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .administration import AdminSetup, require_platform_owner
 from .daily_reminders import SmsDeliveryError, hubtel_send_sms
-from .main import SECRET_KEY, Base, CurrentUser, Db, User, app, audit, password_hash
+from .main import SECRET_KEY, Base, CurrentUser, Db, User, app, audit, password_binding, password_hash, require_platform_admin
 from .password_recovery import recovery_mail_settings, send_account_email
 
 TTL = timedelta(minutes=10)
@@ -36,6 +36,7 @@ class AdministratorContactProof(Base):
     last_authenticator_step: Mapped[int | None] = mapped_column(BigInteger)
     authenticator_window: Mapped[int | None] = mapped_column(BigInteger)
     authenticator_attempts: Mapped[int | None]
+    existing_enrollment_proof: Mapped[str | None] = mapped_column(String(64))
 
 
 class VerifyAdministratorContact(BaseModel):
@@ -46,6 +47,11 @@ class VerifyAdministratorContact(BaseModel):
 
 class ActivateAdministrator(VerifyAdministratorContact):
     password: str = Field(min_length=12, max_length=128)
+
+
+class ExistingAdministratorEnrollment(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    password: str = Field(min_length=1, max_length=128)
 
 
 def digest(label: str, value: str) -> str:
@@ -72,16 +78,52 @@ def matching_step(key: bytes, code: str, now: datetime, last_step: int | None) -
     return None
 
 
+def account_enrollment_proof(account: User) -> str:
+    return digest('existing', f'{password_binding(account, "administrator-enrollment")}:{account.email}:{account.phone_number}')
+
+
+def can_enroll(account: User | None, proof: AdministratorContactProof) -> bool:
+    if account is None or account.is_suspended or not account.phone_number:
+        return False
+    if proof.existing_enrollment_proof is None:
+        return account.account_type == 'pending_admin'
+    return (
+        account.is_platform_admin and proof.last_authenticator_step is None
+        and hmac.compare_digest(proof.existing_enrollment_proof, account_enrollment_proof(account))
+    )
+
+
 @app.post('/admin/administrators/{administrator_id}/contact-verification', tags=TAGS)
 def start_contact_verification(administrator_id: int, owner: CurrentUser, db: Db):
     require_platform_owner(owner, db)
-    settings = recovery_mail_settings()
-    if settings is None:
-        raise HTTPException(503, 'Verification email is unavailable')
     db.scalar(select(AdminSetup.id).where(AdminSetup.id == 1).with_for_update())
     account = db.get(User, administrator_id)
     if account is None or account.account_type != 'pending_admin' or not account.phone_number:
         raise HTTPException(404, 'Pending administrator not found')
+    return send_contact_verification(db, owner, account, None)
+
+
+@app.post('/auth/admin/authenticator-enrollment', tags=TAGS)
+def start_existing_enrollment(data: ExistingAdministratorEnrollment, user: CurrentUser, db: Db):
+    require_platform_admin(user)
+    account = db.scalar(select(User).where(User.id == user.id).with_for_update()
+                        .execution_options(populate_existing=True))
+    if account is None or account.is_suspended or not password_hash.verify(data.password, account.password_hash):
+        raise HTTPException(403, 'The current password is incorrect')
+    if not account.phone_number:
+        raise HTTPException(409, 'A saved phone number is required for administrator enrollment')
+    proof = db.get(AdministratorContactProof, account.id)
+    if proof and proof.last_authenticator_step is not None:
+        raise HTTPException(409, 'This account already has an authenticator')
+    return send_contact_verification(db, account, account, account_enrollment_proof(account))
+
+
+def send_contact_verification(db: Db, actor: User, account: User, existing_proof: str | None):
+    settings = recovery_mail_settings()
+    if settings is None:
+        raise HTTPException(503, 'Verification email is unavailable')
+    authenticator_key(account.id, 'configuration-check')
+    administrator_id = account.id
     now = datetime.now(timezone.utc)
     proof = db.get(AdministratorContactProof, administrator_id)
     if proof and proof.sent_at.replace(tzinfo=timezone.utc) > now - RESEND_DELAY:
@@ -98,8 +140,9 @@ def start_contact_verification(administrator_id: int, owner: CurrentUser, db: Db
     proof.verified_at = None
     proof.enrollment_digest = None
     proof.authenticator_nonce = None
+    proof.existing_enrollment_proof = existing_proof
     email, phone = account.email, account.phone_number
-    audit(db, owner, 'send_admin_contact_verification', 'platform_admin', administrator_id)
+    audit(db, actor, 'send_admin_contact_verification', 'platform_admin', administrator_id)
     db.commit()
     try:
         hubtel_send_sms(phone, f'AquaFarm Manager Ghana verification code: {code}. It expires in 10 minutes.')
@@ -127,7 +170,7 @@ def verify_contact(data: VerifyAdministratorContact, db: Db):
     if proof is None:
         raise invalid
     account = db.get(User, proof.user_id)
-    if account is None or account.account_type != 'pending_admin':
+    if not can_enroll(account, proof):
         raise invalid
     valid = hmac.compare_digest(proof.code_digest, digest('sms', f'{data.token}:{data.code}'))
     if valid:
@@ -157,6 +200,7 @@ def verify_contact(data: VerifyAdministratorContact, db: Db):
         'enrollment_token': enrollment_token,
         'setup_key': base64.b32encode(key).decode(),
         'account_email': account.email,
+        'existing_account': proof.existing_enrollment_proof is not None,
     }
 
 
@@ -173,10 +217,14 @@ def activate_administrator(data: ActivateAdministrator, db: Db):
     if proof is None or not proof.authenticator_nonce:
         raise invalid
     db.scalar(select(AdminSetup.id).where(AdminSetup.id == 1).with_for_update())
+    account = db.scalar(select(User).where(User.id == proof.user_id).with_for_update())
+    if not can_enroll(account, proof):
+        raise invalid
+    existing = proof.existing_enrollment_proof is not None
     step = matching_step(authenticator_key(proof.user_id, proof.authenticator_nonce), data.code, now, None)
     values = {'attempts': AdministratorContactProof.attempts + 1}
     if step is not None:
-        values.update(enrollment_digest=None, last_authenticator_step=step)
+        values.update(enrollment_digest=None, last_authenticator_step=step, existing_enrollment_proof=None)
     claimed = db.execute(update(AdministratorContactProof).where(
         AdministratorContactProof.user_id == proof.user_id,
         AdministratorContactProof.enrollment_digest == enrollment,
@@ -188,20 +236,20 @@ def activate_administrator(data: ActivateAdministrator, db: Db):
     if step is None:
         db.commit()
         raise invalid
-    account = db.get(User, proof.user_id)
-    if account is None or account.account_type != 'pending_admin':
-        raise invalid
     account.password_hash = password_hash.hash(data.password)
     account.phone_verified_at = proof.verified_at
     account.account_type = 'admin'
-    audit(db, account, 'activate_administrator', 'platform_admin', account.id)
+    if existing:
+        account.session_generation = secrets.token_hex(16)
+        account.recovery_requested_at = None
+    audit(db, account, 'enroll_existing_authenticator' if existing else 'activate_administrator', 'platform_admin', account.id)
     db.commit()
     return {'message': 'Administrator account activated. Sign in with your new credentials.'}
 
 
 def check_administrator_authenticator(db, user: User, code: str | None) -> None:
     proof = db.get(AdministratorContactProof, user.id)
-    if proof is None:
+    if proof is None or (proof.last_authenticator_step is None and proof.existing_enrollment_proof is not None):
         return  # Preserve accounts created before authenticator enrollment was introduced.
     if proof.last_authenticator_step is None or not proof.authenticator_nonce:
         raise HTTPException(403, 'Administrator authenticator enrollment is incomplete')

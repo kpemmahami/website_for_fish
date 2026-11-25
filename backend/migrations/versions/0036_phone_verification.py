@@ -10,6 +10,7 @@ depends_on = None
 
 def upgrade():
     op.add_column('users', sa.Column('phone_verified_at', sa.DateTime(timezone=True)))
+    op.add_column('administrator_contact_proofs', sa.Column('existing_enrollment_proof', sa.String(64)))
     op.create_table(
         'account_phone_challenges',
         sa.Column('user_id', sa.Integer(), sa.ForeignKey('users.id'), primary_key=True),
