@@ -153,3 +153,24 @@ def assigned_feeding_history(unit_id: int, user: CurrentUser, db: Db, offset: in
      .where(StockingCycle.unit_id.in_(assignment), FeedLedger.event_type == 'feeding')
      .order_by(FeedLedger.occurred_on.desc(), FeedLedger.id.desc()).offset(offset).limit(26)).all()
     return {'items': [dict(row._mapping) for row in rows[:25]], 'has_more': len(rows) > 25}
+
+
+@app.get('/farms/{farm_id}/units/{unit_id}/staff-feeding-options')
+def staff_feeding_options(farm_id: int, unit_id: int, user: CurrentUser, db: Db):
+    farm, _ = feeding_write_scope(farm_id, unit_id, user, db)
+    unit = db.get(ProductionUnit, unit_id)
+    cycles = db.execute(select(
+        StockingCycle.id, StockingCycle.species, StockingCycle.stocked_on,
+    ).where(StockingCycle.unit_id == unit_id, StockingCycle.closed_at.is_(None))
+     .order_by(StockingCycle.stocked_on.desc(), StockingCycle.id.desc()))
+    products = db.execute(select(FeedProduct.id, FeedProduct.name)
+                          .where(FeedProduct.farm_id == farm_id)
+                          .order_by(FeedProduct.name, FeedProduct.id))
+    return {
+        'location_configured': (
+            (unit.latitude is not None or farm.latitude is not None)
+            and (unit.longitude is not None or farm.longitude is not None)
+        ),
+        'cycles': [dict(row._mapping) for row in cycles],
+        'feeds': [dict(row._mapping) for row in products],
+    }

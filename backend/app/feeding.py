@@ -535,7 +535,8 @@ def record_feeding(
     db.add(entry)
     db.flush()
     audit(db, user, 'create', 'feeding', entry.id, json.dumps({
-        'cycle_id': cycle_id, 'quantity_kg': data.quantity_kg, 'session_number': data.session_number,
+        'farm_id': farm_id, 'unit_id': unit_id, 'cycle_id': cycle_id,
+        'quantity_kg': data.quantity_kg, 'session_number': data.session_number,
     }))
     from .evidence import attach_record_evidence
     attach_record_evidence(db, evidence_id, farm_id, unit_id, cycle_id, 'feeding', entry.id, user)

@@ -41,6 +41,7 @@ class EvidenceCapturePage extends StatefulWidget {
     required this.unit,
     required this.activity,
     this.cycleId,
+    this.locationConfigured,
     super.key,
   });
 
@@ -51,6 +52,7 @@ class EvidenceCapturePage extends StatefulWidget {
   final Map<String, dynamic> unit;
   final String activity;
   final int? cycleId;
+  final bool? locationConfigured;
 
   @override
   State<EvidenceCapturePage> createState() => _EvidenceCapturePageState();
@@ -135,7 +137,7 @@ class _EvidenceCapturePageState extends State<EvidenceCapturePage> {
         widget.unit['latitude'] != null && widget.unit['longitude'] != null;
     final farmHasLocation =
         widget.farm['latitude'] != null && widget.farm['longitude'] != null;
-    if (!unitHasLocation && !farmHasLocation) {
+    if (!(widget.locationConfigured ?? (unitHasLocation || farmHasLocation))) {
       throw Exception('Add GPS coordinates to the farm or unit before recording evidence.');
     }
     if (!await Geolocator.isLocationServiceEnabled()) {

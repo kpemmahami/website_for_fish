@@ -128,6 +128,11 @@ class AppController extends ChangeNotifier {
     return results.map((row) => Map<String, dynamic>.from(row as Map)).toList();
   }
 
+  Future<Map<String, dynamic>> loadStaffFeedingOptions(int farmId, int unitId) async {
+    final result = await api.get('/farms/$farmId/units/$unitId/staff-feeding-options') as Map;
+    return Map<String, dynamic>.from(result);
+  }
+
   void clearError() {
     error = null;
     notifyListeners();
@@ -328,15 +333,16 @@ class AppController extends ChangeNotifier {
     required int? cycleId,
     required Map<String, dynamic> body,
     required EvidenceCapture evidence,
+    int? farmId,
   }) async {
-    final farm = selectedFarm;
+    final targetFarmId = farmId ?? selectedFarm?['id'] as int?;
     final currentUser = user;
-    if (farm == null || currentUser == null) {
+    if (targetFarmId == null || currentUser == null) {
       throw const ApiException('Select a farm and sign in before recording.');
     }
     await store.queueRecord({
       'owner_id': currentUser['id'] as int,
-      'farm_id': farm['id'] as int,
+      'farm_id': targetFarmId,
       'unit_id': unit['id'] as int,
       'cycle_id': cycleId,
       'activity': activity,

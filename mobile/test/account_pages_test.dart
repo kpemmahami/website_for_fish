@@ -10,6 +10,66 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  testWidgets(
+    'assigned-unit feeding opens only when the assignment grants it',
+    (tester) async {
+      final controller = AppController(OfflineStore());
+      controller.api = ApiClient(
+        baseUrl: 'https://farm.example',
+        client: MockClient((request) async {
+          final path = request.url.path;
+          if (path == '/staff/assigned-units') {
+            return http.Response(
+              jsonEncode([
+                {
+                  'farm_id': 1,
+                  'unit_id': 4,
+                  'farm_name': 'Test Farm',
+                  'unit_name': 'Read Pond',
+                  'unit_type': 'pond',
+                },
+                {
+                  'farm_id': 1,
+                  'unit_id': 5,
+                  'farm_name': 'Test Farm',
+                  'unit_name': 'Feed Pond',
+                  'unit_type': 'pond',
+                  'can_record_feeding': true,
+                },
+              ]),
+              200,
+            );
+          }
+          expect(path, '/farms/1/units/5/staff-feeding-options');
+          return http.Response(
+            jsonEncode({
+              'location_configured': true,
+              'cycles': [
+                {'id': 8, 'species': 'Tilapia', 'stocked_on': '2026-11-24'},
+              ],
+              'feeds': [
+                {'id': 9, 'name': 'Pellets'},
+              ],
+            }),
+            200,
+          );
+        }),
+      );
+      await tester.pumpWidget(
+        MaterialApp(home: AssignedUnitsPage(controller: controller)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Read Pond'));
+      await tester.pumpAndSettle();
+      expect(find.text('Record assigned feeding'), findsNothing);
+      await tester.tap(find.text('Feed Pond'));
+      await tester.pumpAndSettle();
+      expect(find.text('Record assigned feeding'), findsOneWidget);
+      expect(find.text('Record evidence video'), findsOneWidget);
+      controller.dispose();
+    },
+  );
+
   testWidgets('farmer recovery requests an email link', (tester) async {
     final controller = AppController(OfflineStore());
     controller.api = ApiClient(
@@ -52,7 +112,9 @@ void main() {
           expect(request.headers['authorization'], 'Bearer test-session');
           if (request.url.path.endsWith('/request')) {
             return http.Response.bytes(
-              utf8.encode(jsonEncode({'destination': '•••0001', 'verified': false})),
+              utf8.encode(
+                jsonEncode({'destination': '•••0001', 'verified': false}),
+              ),
               200,
               headers: {'Content-Type': 'application/json; charset=utf-8'},
             );

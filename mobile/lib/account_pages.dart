@@ -1,6 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
 import 'app_controller.dart';
+import 'staff_feeding_page.dart';
 
 class PasswordRecoveryPage extends StatefulWidget {
   const PasswordRecoveryPage({
@@ -236,8 +237,28 @@ class _AssignedUnitsPageState extends State<AssignedUnitsPage> {
               ListTile(
                 title: Text(unit['unit_name'] as String),
                 subtitle: Text(
-                  "${unit['farm_name']} · ${unit['unit_type']} · Read-only",
+                  "${unit['farm_name']} · ${unit['unit_type']} · ${unit['can_record_feeding'] == true ? 'Feeding access' : 'Read-only'}",
                 ),
+                trailing: unit['can_record_feeding'] == true
+                    ? const Icon(Icons.chevron_right)
+                    : null,
+                onTap: unit['can_record_feeding'] != true
+                    ? null
+                    : () async {
+                        final message = await Navigator.of(context)
+                            .push<String>(
+                              MaterialPageRoute(
+                                builder: (_) => StaffFeedingPage(
+                                  controller: widget.controller,
+                                  assignment: unit,
+                                ),
+                              ),
+                            );
+                        if (message != null && context.mounted) {
+                          ScaffoldMessenger.of(context)
+                              .showSnackBar(SnackBar(content: Text(message)));
+                        }
+                      },
               ),
           ],
         );
