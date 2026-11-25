@@ -168,3 +168,9 @@ AQUAFARM_STAFF_PORTAL_URL and AQUAFARM_STAFF_SMTP_HOST and
 AQUAFARM_STAFF_SMTP_FROM. The default STARTTLS port is 587 and can be overridden
 with AQUAFARM_STAFF_SMTP_PORT. If the SMTP server requires authentication, set
 AQUAFARM_STAFF_SMTP_USERNAME and AQUAFARM_STAFF_SMTP_PASSWORD server-side.
+
+## Interface development standard
+
+Give each page one primary purpose. Use concise module landings with links to dedicated entry, configuration, status, history and analytics views. Reuse existing histories and authoritative status fields, and distinguish overlapping views without duplicating records. Keep relevant actions discoverable with consistent terminology, back navigation and accessible responsive controls. Preserve form data after failed saves and protect unsaved changes where applicable. Refresh affected records and counts after confirmed mutations. Enforce account permissions and tenant boundaries in the backend, preserve existing data and links, and verify web and native mobile behavior separately.
+
+See [Phase 1D audit and acceptance checklist](PHASE_1D_CHECKLIST.md).

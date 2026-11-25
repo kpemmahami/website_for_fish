@@ -78,6 +78,15 @@ def pending_farmers(user: CurrentUser, db: Db, offset: int = Query(0, ge=0)):
     return {'items': items[:50], 'has_more': len(items) > 50}
 
 
+@app.get('/admin/farmers/approved', tags=['Platform administration'])
+def approved_farmers(user: CurrentUser, db: Db, offset: int = Query(0, ge=0)):
+    require_platform_admin(user)
+    rows = db.execute(select(User.id, User.full_name, User.email, User.phone_number, User.created_at)
+                      .where(User.account_type == 'farmer')
+                      .order_by(User.created_at.desc(), User.id.desc()).offset(offset).limit(51)).all()
+    return {'items': [dict(row._mapping) for row in rows[:50]], 'has_more': len(rows) > 50}
+
+
 @app.post('/admin/farmers/{farmer_id}/approve', tags=['Platform administration'])
 def approve_farmer(farmer_id: int, user: CurrentUser, db: Db):
     require_platform_admin(user)

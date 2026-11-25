@@ -1,3 +1,4 @@
+import {InstitutionApprovalHistory, InstitutionReviewPages, type Institution} from './institutionReviewPages';
 import {resolveApiBase} from './apiBase';
 import {ProcessingEvidenceLibrary} from './processingEvidence';
 import {ProcessingWorkspace} from './processingWorkspace';
@@ -264,8 +265,14 @@ function App(){
  const [dailyRecordStatus,setDailyRecordStatus]=useState<Obj|null>(null);
  const [loans,setLoans]=useState<Obj[]>([]);const [reminders,setReminders]=useState<Obj[]>([]);
  const [institutions,setInstitutions]=useState<Obj[]>([]);const [mine,setMine]=useState<Obj[]>([]);
- const [pendingInstitutions,setPendingInstitutions]=useState<Obj[]>([]);
- const [institutionReviewFilter,setInstitutionReviewFilter]=useState('all');
+ const [pendingInstitutions,setPendingInstitutions]=useState<Institution[]>([]);
+ const [adminHash,setAdminHash]=useState(window.location.hash);
+ useEffect(()=>{
+   const sync=()=>setAdminHash(window.location.hash);
+   window.addEventListener('hashchange',sync);
+   return ()=>window.removeEventListener('hashchange',sync);
+ },[]);
+ const adminView=adminHash.startsWith('#admin/')?adminHash.slice(7):'';
  const [institutionReviewSearch,setInstitutionReviewSearch]=useState('');
 
  const [institutionId,setInstitutionId]=useState<number|null>(null);const [lenderApps,setLenderApps]=useState<Obj[]>([]);
@@ -1517,7 +1524,7 @@ function App(){
  <button type="button" aria-current={page==='production'&&productionView==='landing'?'page':undefined} onClick={()=>openProduction('landing')}>Production Overview</button>
  {productionActivities.map(activity=><button type="button" key={activity.key} aria-current={page==='production'&&productionView===activity.key?'page':undefined} onClick={()=>openProduction(activity.key)}>{activity.label}</button>)}
  </div>
- </div>:<button key={key} className={(page===key||(page==='units'&&key==='farms')||(page==='expenses'&&key==='finance'))?'active':''} aria-current={page===key?'page':undefined} onClick={()=>{if(key==='overview'){backToDashboard();void loadFarm()}else if(key==='processing'){openProcessing()}else if(key==='sales'&&processorOnly){openProcessing('sales')}else if(key==='reports'){openReport(null)}else{setPage(key);window.history.replaceState(null,'',window.location.pathname+window.location.search)}setProductionExpanded(false);setForm({});setSelectedApp(null);setSelectedLoan(null);setNotice('')}}>{ic}{label}</button>)}</nav>;
+ </div>:<button key={key} className={(page===key||(page==='units'&&key==='farms')||(page==='expenses'&&key==='finance'))?'active':''} aria-current={page===key?'page':undefined} onClick={()=>{if(key==='overview'){backToDashboard();void loadFarm()}else if(key==='processing'){openProcessing()}else if(key==='sales'&&processorOnly){openProcessing('sales')}else if(key==='reports'){openReport(null)}else if(key==='admin'){setPage('admin');window.location.hash='admin'}else{setPage(key);window.history.replaceState(null,'',window.location.pathname+window.location.search)}setProductionExpanded(false);setForm({});setSelectedApp(null);setSelectedLoan(null);setNotice('')}}>{ic}{label}</button>)}</nav>;
  return <div className="shell"><MobileWorkspaceNav title={pageTitle??'Workspace'}
   navigation={renderWorkspaceNav('mobile')} accountName={user.full_name}
   overdueLoans={reminders.filter(row=>row.status==='overdue').length}
@@ -2100,27 +2107,40 @@ function App(){
   </details>}
  </>}
  {page==='admin'&&user?.is_platform_admin&&<>
- <section className="panel">
+ {adminView&&<a className="outline" href={adminView.startsWith('institutions/')?'#admin/institutions':adminView.startsWith('farmers/')?'#admin/farmers':'#admin'}>Back</a>}
+ {!adminView&&<section className="panel"><h2>Platform management</h2><div className="farmactions">
+  <a className="outline" href="#admin/farmers">Farmer and processor management</a>
+  <a className="outline" href="#admin/institutions">Financial institution management</a>
+  {user.is_platform_owner&&<a className="outline" href="#admin/administrators">Administrators</a>}
+  <a className="outline" href="#admin/security">Account security</a>
+ </div></section>}
+ {adminView==='security'&&<section className="panel">
    {phoneVerification}
    <AdministratorAuthenticator phone={user.phone_number??null} enrolled={Boolean(user.authenticator_enrolled)}
      send={password=>json('/auth/admin/authenticator-enrollment',{password})}
      generateCodes={(password,authenticator_code)=>json('/auth/admin/recovery-codes',{password,authenticator_code})}/>
- </section>
- <FarmerApprovals load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>
- {user.is_platform_owner&&<AdministratorDirectory load={json}
+ </section>}
+ {adminView==='farmers'&&<section className="panel">
+  <h2>Farmer and processor management</h2>
+  <div className="farmactions">
+   <a className="outline" href="#admin/farmers/pending">Pending approvals</a>
+   <a className="outline" href="#admin/farmers/approved">Approved accounts</a>
+  </div>
+ </section>}
+ {adminView==='farmers/approved'&&<FarmerApprovals key="approved" load={json}/>}
+ {adminView==='farmers/pending'&&<FarmerApprovals key="pending" load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>}
+ {adminView==='administrators'&&user.is_platform_owner&&<AdministratorDirectory load={json}
    loadActivity={(id,offset)=>json(`/admin/administrators/${id}/activity?offset=${offset}`)}
    prepare={details=>json('/admin/administrators',details)}
    sendVerification={id=>json(`/admin/administrators/${id}/contact-verification`,{})}
    changeAccess={(id,action,reason)=>json(`/admin/administrators/${id}/access`,{action,reason})}/>}
- <section className="panel">
- <h2>Stakeholder Approvals</h2>
- <h3>Financial institutions</h3>
- <details><summary>Register institution</summary>
+ {adminView==='institutions/register'&&<section className="panel">
+  <h2>Register financial institution</h2>
  <form className="farmform" autoComplete="off" onSubmit={e=>formSubmit(e,'/finance/admin/institutions',{
    full_name:form.institution_admin_name,email:form.institution_admin_email,password:form.institution_admin_password,
    phone_number:form.institution_admin_phone,
    institution:{name:form.institution_name,institution_type:form.institution_type,account_number:form.institution_reference}
- },()=>setForm({}))}>
+ },()=>{setForm({});window.location.hash="admin/institutions"})}>
    {field('institution_name','Official institution name','text',{required:true,minLength:3,maxLength:180})}
    {dropdown('institution_type','Institution type',[{value:'bank',label:'Commercial bank'},{value:'rural_bank',label:'Rural or community bank'},{value:'microfinance',label:'Microfinance'},{value:'credit_union',label:'Credit union'},{value:'other',label:'Other'}])}
    {field('institution_reference','Institution registration or account reference','text',{required:true,minLength:3,maxLength:100})}
@@ -2130,30 +2150,13 @@ function App(){
    {field('institution_admin_password','Temporary administrator password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
    <button className="primary" disabled={busy}>Register institution</button>
  </form>
- </details>
- <div className="farmform">
- <label className="field"><span>Search institutions</span><input type="search" value={institutionReviewSearch} onChange={e=>setInstitutionReviewSearch(e.target.value)}/></label>
- <label className="field"><span>Status</span><select value={institutionReviewFilter} onChange={e=>setInstitutionReviewFilter(e.target.value)}>
- {Object.entries({all:'All',pending:'Pending',under_review:'Under review',more_info_required:'More information required',verified:'Approved',rejected:'Rejected',suspended:'Suspended'}).map(([value,label])=><option key={value} value={value}>{label}</option>)}
- </select></label>
- </div>
- {pendingInstitutions.filter(inst=>(institutionReviewFilter==='all'||inst.status===institutionReviewFilter)&&String(inst.name+' '+inst.registration_number).toLowerCase().includes(institutionReviewSearch.trim().toLowerCase())).map(inst=>{
-   const actions:Record<string,string>={};
-   if(inst.status==='pending'||inst.status==='more_info_required')actions.under_review='Start review';
-   if(inst.status==='pending'||inst.status==='under_review')actions.more_info_required='Request more information';
-   if(['pending','under_review','more_info_required'].includes(inst.status)){actions.verified='Approve';actions.rejected='Reject'}
-   if(user.is_platform_owner&&inst.status==='verified')actions.suspended='Suspend';
-   if(user.is_platform_owner&&inst.status==='suspended')actions.verified='Reactivate';
-   return <div className="item" key={inst.id}><b>{inst.name} ? {inst.status==='verified'?'approved':inst.status.replace(/_/g,' ')}</b>
-    <p className="muted">{inst.institution_type} ? {inst.registration_number}</p>
-    <div className="row-actions">{Object.entries(actions).map(([status,label])=><button key={status} type="button" className="outline small" disabled={busy} onClick={()=>{
-      const reason=window.prompt(label+' '+inst.name+' ? enter a reason');
-      if(reason?.trim()&&window.confirm(label+' '+inst.name+'?'))void submit('/finance/admin/institutions/'+inst.id+'/status',{status,reason:reason.trim()});
-    }}>{label}</button>)}</div>
-   </div>
- })}
- <button className="outline" type="button" onClick={()=>void loadBase()}>Refresh institutions</button>
- </section>
+ </section>}
+ {/^institutions\/history(?:\/\d+)?$/.test(adminView)&&
+  <InstitutionApprovalHistory key={adminView} institutionId={Number(adminView.split('/')[2])||undefined} load={json}/>}
+ {adminView.startsWith('institutions')&&adminView!=='institutions/register'&&!adminView.startsWith('institutions/history')&&
+  <InstitutionReviewPages key={adminView} view={adminView} rows={pendingInstitutions} owner={Boolean(user.is_platform_owner)}
+    search={institutionReviewSearch} setSearch={setInstitutionReviewSearch} busy={busy} decide={(id,status,reason,queue)=>
+      submit('/finance/admin/institutions/'+id+'/status',{status,reason},()=>{window.location.hash='admin/institutions/'+queue})}/>}
 </>}
  {page==='lender'&&<>
   <div className="twocol">

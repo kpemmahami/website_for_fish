@@ -4,12 +4,12 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal
-from fastapi import HTTPException, Response
+from fastapi import HTTPException, Query, Response
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, select, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
-from .main import Base, app, Db, CurrentUser, User, Farm, owned_farm, audit, Register, new_user, require_platform_admin
+from .main import AuditLog, Base, app, Db, CurrentUser, User, Farm, owned_farm, audit, Register, new_user, require_platform_admin
 from .main import assign_phone_number, duplicate_phone_claim
 from .dashboard import build_dashboard
 from .phone_numbers import PhoneNumber
@@ -577,6 +577,34 @@ def list_institution_reviews(user: CurrentUser, db: Db):
     return [institution_view(row) for row in db.scalars(
         select(Institution).order_by(Institution.created_at.desc(), Institution.id.desc())
     )]
+
+
+@app.get('/finance/admin/institutions/history', tags=['Financial institutions and loan appraisal'])
+def institution_approval_history(
+    user: CurrentUser, db: Db, institution_id: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+):
+    require_platform_admin(user)
+    query = select(AuditLog, Institution.name, User.full_name).join(
+        Institution, Institution.id == AuditLog.entity_id,
+    ).join(User, User.id == AuditLog.actor_id).where(
+        AuditLog.entity_type == 'finance_institution',
+        AuditLog.action.in_(('provision', 'verify', 'reject', 'change_status')),
+    )
+    if institution_id is not None:
+        query = query.where(Institution.id == institution_id)
+    rows = db.execute(query.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset(offset).limit(26)).all()
+    items = []
+    for entry, institution, actor in rows[:25]:
+        details = json.loads(entry.details)
+        items.append({
+            'id': entry.id, 'institution_id': entry.entity_id, 'institution': institution,
+            'actor': actor, 'created_at': entry.created_at, 'action': entry.action,
+            'previous_status': details.get('previous_status'),
+            'status': details.get('status') or {'verify': 'verified', 'reject': 'rejected', 'provision': 'pending'}.get(entry.action),
+            'reason': details.get('reason'),
+        })
+    return {'items': items, 'has_more': len(rows) > 25}
 
 
 @app.post('/finance/admin/institutions/{institution_id}/status', tags=['Financial institutions and loan appraisal'])

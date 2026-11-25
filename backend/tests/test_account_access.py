@@ -150,6 +150,14 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
         row['id'] for row in client.get('/admin/farmers/pending', headers=admin).json()['items']
     }
     assert client.post(approval_path, headers=admin).status_code == 200
+    approved_path = '/admin/farmers/approved'
+    assert client.get(approved_path, headers=farmer).status_code == 403
+    assert registration.json()['id'] in {
+        row['id'] for row in client.get(approved_path, headers=admin).json()['items']
+    }
+    assert registration.json()['id'] not in {
+        row['id'] for row in client.get('/admin/farmers/pending', headers=admin).json()['items']
+    }
     assert client.post(approval_path, headers=admin).status_code == 404
     assert client.get('/auth/me', headers=farmer).json()['account_type'] == 'farmer'
     assert client.get('/farms', headers=farmer).status_code == 200
@@ -441,6 +449,17 @@ def test_institution_review_and_suspension():
         response = client.post(path, headers=admin, json={'status': status, 'reason': 'Review test'})
         assert response.status_code == 200, response.text
         assert client.get(loans, headers=lender).status_code == access
+    history = f'/finance/admin/institutions/history?institution_id={institution_id}'
+    assert client.get(history).status_code == 401
+    assert client.get(history, headers=lender).status_code == 403
+    response = client.get(history, headers=admin)
+    assert response.status_code == 200, response.text
+    latest = response.json()['items'][0]
+    assert latest['institution'] == 'Review Test Bank'
+    assert latest['previous_status'] == 'suspended'
+    assert latest['status'] == 'verified'
+    assert latest['reason'] == 'Review test'
+    assert latest['actor']
     with SessionLocal() as db:
         changes = db.scalars(select(AuditLog).where(
             AuditLog.entity_type == 'finance_institution',
