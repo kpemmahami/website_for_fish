@@ -84,6 +84,31 @@ def test_loan_servicing_permissions_and_balances():
     assert paid.json()['principal_repaid_ghs']==200
     assert paid.json()['outstanding_principal_ghs']==9800
     assert paid.json()['total_scheduled_balance_ghs']==9800
+    disbursements = f'/finance/institutions/{iid}/disbursements'
+    assert client.get(disbursements, headers=stranger).status_code == 404
+    report = client.get(disbursements, headers=lender)
+    assert report.status_code == 200, report.text
+    assert report.json()['totals'] == {
+        'disbursed_ghs': 10000, 'recovered_ghs': 1500,
+        'principal_recovered_ghs': 200, 'principal_recovery_percent': 2,
+    }
+    assert report.json()['items'][0]['customer_name']
+    assert report.json()['items'][0]['loan_id'] == loan_id
+    portfolio = client.get(f'/finance/institutions/{iid}/portfolio', headers=lender)
+    assert portfolio.json()['principal_recovery_percent'] == 2
+    customers = f'/finance/institutions/{iid}/collection-customers'
+    daily = f'/finance/institutions/{iid}/collections?day={today}'
+    assert client.get(customers, headers=stranger).status_code == 404
+    assert client.get(daily, headers=reviewer).status_code == 404
+    response = client.get(customers, params={'search': f'AQUA-LOAN-{loan_id:06d}'}, headers=officer)
+    assert response.status_code == 200, response.text
+    assert [row['loan_id'] for row in response.json()['items']] == [loan_id]
+    response = client.get(daily, headers=officer)
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report['count'] == 1
+    assert report['total_ghs'] == 1500
+    assert report['items'][0]['evidence_id'] == repay['evidence_id']
     transaction_history=client.get(f'/finance/loans/{loan_id}/transactions',headers=farmer)
     assert transaction_history.status_code==200,transaction_history.text
     disbursement_record=next(item for item in transaction_history.json() if item['type']=='disbursement')
@@ -107,6 +132,11 @@ def test_loan_servicing_permissions_and_balances():
     assert final.status_code==201,final.text
     assert final.json()['status']=='repaid'
     assert final.json()['total_scheduled_balance_ghs']==0
+    final_totals = client.get(disbursements, headers=lender).json()['totals']
+    assert final_totals == {
+        'disbursed_ghs': 10000, 'recovered_ghs': 11300,
+        'principal_recovered_ghs': 10000, 'principal_recovery_percent': 100,
+    }
 
 def test_custom_schedule_reminders_and_portfolio_metrics():
     farmer=signup('custom-schedule-farmer@example.com')

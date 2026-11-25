@@ -1,3 +1,5 @@
+import {LoanDisbursements, recoveryRate} from './loanDisbursements';
+import {LoanCollections} from './loanCollections';
 import {InstitutionApprovalHistory, InstitutionReviewPages, type Institution} from './institutionReviewPages';
 import {resolveApiBase} from './apiBase';
 import {ProcessingEvidenceLibrary} from './processingEvidence';
@@ -24,7 +26,7 @@ import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, Refres
 import './style.css';
 
 type Obj = Record<string, any>;
-type Page = 'overview'|'farms'|'units'|'production'|'finance'|'reports'|'lender'|'admin'|'sales'|'inventory'|'staff'|'settings'|'expenses'|'history'|'processing';
+type Page = 'overview'|'farms'|'units'|'production'|'finance'|'reports'|'lender'|'admin'|'sales'|'inventory'|'staff'|'settings'|'expenses'|'history'|'processing'|'collections'|'disbursements';
 const productionActivities = [
  {key:'stocking', label:'Stocking', description:'Record new stock and plan harvest dates.', icon:Fish},
  {key:'feeding', label:'Feeding', description:'Check feed stock and record consumption.', icon:Package},
@@ -1120,6 +1122,7 @@ function App(){
    e.preventDefault();if(!selectedLoan)return;
    if(!transactionVideo){setError('Record the required new 15-second video before submitting this transaction.');return}
    const id=selectedLoan.id;
+   if(page==='collections'&&!form.collection_consent){setError('Confirm the customer consents to the recording.');return}
    setBusy(true);setError('');setNotice('');
    try{
      let evidenceId=transactionEvidenceId;
@@ -1127,7 +1130,8 @@ function App(){
      await json(`/finance/loans/${id}/${kind}`,{amount_ghs:form.loan_amount_ghs,reference:form.loan_reference,transaction_date:form.loan_transaction_date,evidence_id:evidenceId});
      setNotice(kind==='disbursements'?'Disbursement recorded with video evidence.':'Repayment recorded with video evidence.');
      setForm({});setTransactionVideo(null);setTransactionEvidenceId(null);setTransactionRecorderKey(key=>key+1);
-     await Promise.all([loadFarm(),loadLender()]);await openLoan(id)
+     await Promise.all([loadFarm(),loadLender()]);
+     if(page==='collections'||page==='disbursements')setSelectedLoan(null);else await openLoan(id)
    }
    catch(error){setError(String(error))}
    finally{setBusy(false)}
@@ -1513,7 +1517,7 @@ function App(){
    if(balanceFilter==='current')return Boolean(!row.due_on||row.due_on>=localDate());
    return true;
  })??[];
- const pageTitle=page==='production'?(productionView==='landing'?'Production Management':productionActivities.find(item=>item.key===productionView)?.label):page==='units'?'Production units':page==='history'?'Farm Activity History':page==='reports'?(reports.find(([key])=>key===reportView)?.[1]??'Farm Reports & Analytics'):page==='expenses'?'Farm Expenses':nav.find(x=>x[0]===page)?.[1];
+ const pageTitle=page==='disbursements'?'Disbursements':page==='collections'?'Collections':page==='production'?(productionView==='landing'?'Production Management':productionActivities.find(item=>item.key===productionView)?.label):page==='units'?'Production units':page==='history'?'Farm Activity History':page==='reports'?(reports.find(([key])=>key===reportView)?.[1]??'Farm Reports & Analytics'):page==='expenses'?'Farm Expenses':nav.find(x=>x[0]===page)?.[1];
  const renderWorkspaceNav=(prefix:string)=><nav aria-label="Workspace">{nav.map(([key,label,ic])=>key==='production'?<div className="production-nav" key={key}>
  <button type="button" className={page==='production'?'active':''} aria-expanded={productionExpanded} aria-controls={prefix+'-production-menu'} data-keep-drawer-open={page==='production'} onClick={()=>{
    if(page==='production'&&productionExpanded)setProductionExpanded(false);
@@ -1528,7 +1532,7 @@ function App(){
  return <div className="shell"><MobileWorkspaceNav title={pageTitle??'Workspace'}
   navigation={renderWorkspaceNav('mobile')} accountName={user.full_name}
   overdueLoans={reminders.filter(row=>row.status==='overdue').length}
-  overdueFeeding={dailyRecordStatus?.cycles?.filter((row:Obj)=>row.is_overdue).length??0} signOut={logout}/><aside className="sidebar desktop-workspace-sidebar"><div className="brand"><Waves size={29}/><span>AquaFarm <b>Manager Ghana</b></span></div><div className="navlabel">WORKSPACE</div>{renderWorkspaceNav('desktop')}<div className="sidefoot"><div className="usericon">{user?.full_name?.slice(0,1)||'U'}</div><div className="who"><b>{user?.full_name||'Account'}</b><small>{user?.email||''}</small></div><button aria-label="Sign out" title="Switch account" onClick={logout}><LogOut size={18}/></button></div></aside><main className="main"><header><div><span className="eyebrow">AQUAFARM / {page.toUpperCase()}</span><h1>{pageTitle}</h1></div><div className="headeractions"><button type="button" className="outline desktop-switch-account" onClick={logout}><LogOut size={16}/> Switch account</button>{page!=='lender'&&page!=='admin'&&<select aria-label="Selected farm" value={farmId??''} onChange={e=>{setFarmId(Number(e.target.value));if(page==='history')openHistory({tab:historyContext.tab})}}>{farms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}{!farms.length&&<option value="">No farms</option>}</select>}<button className="outline" onClick={()=>{void loadBase();void loadFarm();void loadUnits();void loadLender();setWorkspaceRefresh(value=>value+1)}}><RefreshCw size={16}/> Refresh</button></div></header>{error&&<div className="alert"><AlertTriangle size={17}/>{error}<button onClick={()=>setError('')}>×</button></div>}{page!=='finance'&&reminders.some(r=>r.status==='overdue')&&<div className="alert" role="status"><AlertTriangle size={17}/>{reminders.filter(r=>r.status==='overdue').length} loan instalment{reminders.filter(r=>r.status==='overdue').length===1?' is':'s are'} overdue. <button className="outline small" onClick={()=>setPage('finance')}>View repayments</button></div>}{notice&&<div className="success"><CheckCircle2 size={17}/>{notice}</div>}
+  overdueFeeding={dailyRecordStatus?.cycles?.filter((row:Obj)=>row.is_overdue).length??0} signOut={logout}/><aside className="sidebar desktop-workspace-sidebar"><div className="brand"><Waves size={29}/><span>AquaFarm <b>Manager Ghana</b></span></div><div className="navlabel">WORKSPACE</div>{renderWorkspaceNav('desktop')}<div className="sidefoot"><div className="usericon">{user?.full_name?.slice(0,1)||'U'}</div><div className="who"><b>{user?.full_name||'Account'}</b><small>{user?.email||''}</small></div><button aria-label="Sign out" title="Switch account" onClick={logout}><LogOut size={18}/></button></div></aside><main className="main"><header><div><span className="eyebrow">AQUAFARM / {page.toUpperCase()}</span><h1>{pageTitle}</h1></div><div className="headeractions"><button type="button" className="outline desktop-switch-account" onClick={logout}><LogOut size={16}/> Switch account</button>{page!=='lender'&&page!=='collections'&&page!=='disbursements'&&page!=='admin'&&<select aria-label="Selected farm" value={farmId??''} onChange={e=>{setFarmId(Number(e.target.value));if(page==='history')openHistory({tab:historyContext.tab})}}>{farms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}{!farms.length&&<option value="">No farms</option>}</select>}<button className="outline" onClick={()=>{void loadBase();void loadFarm();void loadUnits();void loadLender();setWorkspaceRefresh(value=>value+1)}}><RefreshCw size={16}/> Refresh</button></div></header>{error&&<div className="alert"><AlertTriangle size={17}/>{error}<button onClick={()=>setError('')}>×</button></div>}{page!=='finance'&&reminders.some(r=>r.status==='overdue')&&<div className="alert" role="status"><AlertTriangle size={17}/>{reminders.filter(r=>r.status==='overdue').length} loan instalment{reminders.filter(r=>r.status==='overdue').length===1?' is':'s are'} overdue. <button className="outline small" onClick={()=>setPage('finance')}>View repayments</button></div>}{notice&&<div className="success"><CheckCircle2 size={17}/>{notice}</div>}
  {(page==='farms'||page==='units')&&<div className="farmactions workspace-tabs" aria-label="Farm management">
   <button className="outline" aria-pressed={page==='farms'} onClick={()=>setPage('farms')}>Farms</button>
   <button className="outline" aria-pressed={page==='units'} onClick={()=>setPage('units')}>Production units</button>
@@ -2158,6 +2162,24 @@ function App(){
     search={institutionReviewSearch} setSearch={setInstitutionReviewSearch} busy={busy} decide={(id,status,reason,queue)=>
       submit('/finance/admin/institutions/'+id+'/status',{status,reason},()=>{window.location.hash='admin/institutions/'+queue})}/>}
 </>}
+ {page==='collections'&&selectedInstitution?.status==='verified'&&institutionId!=null&&canRepay&&<>
+   <button type="button" className="outline" onClick={()=>setPage('lender')}>Back to lending</button>
+   {portfolio&&<section className="panel"><h2>Portfolio recovery</h2>
+    <Line label="Total recovered" value={money(portfolio.total_collections_ghs)}/>
+    <Line label="Principal recovery" value={recoveryRate(portfolio.principal_recovery_percent)}/>
+    <p className="muted">Principal repaid divided by principal disbursed across this institution's loan accounts.</p>
+   </section>}
+   <LoanCollections key={institutionId} institutionId={institutionId} load={json} refresh={portfolio}
+    collect={id=>{setForm({loan_reference:'FIELD-'+crypto.randomUUID(),loan_transaction_date:new Date().toISOString().slice(0,10)});void openLoan(id)}} video={(id,mediaType)=>void download('/finance/loan-evidence/'+id+'/video',
+     'loan_repayment_'+id+(mediaType==='video/mp4'?'.mp4':'.webm'))}/>
+ </>}
+ {page==='disbursements'&&selectedInstitution?.status==='verified'&&institutionId!=null&&<>
+   <button type="button" className="outline" onClick={()=>setPage('lender')}>Back to lending</button>
+   <LoanDisbursements key={institutionId} institutionId={institutionId} load={json} revision={portfolio}
+    open={id=>{setForm({});void openLoan(id)}} pending={canDisburse?lenderLoans.filter(
+      loan=>loan.status==='awaiting_disbursement'&&Number(loan.undisbursed_ghs)>0).map(
+      loan=>({id:loan.id,undisbursed_ghs:loan.undisbursed_ghs})):[]}/>
+ </>}
  {page==='lender'&&<>
   <div className="twocol">
    <section className="panel">
@@ -2178,6 +2200,8 @@ function App(){
      <InstitutionStaff key={institutionId} id={institutionId} name={selectedInstitution.name} api={json}/>}
    {selectedInstitution?.status==='verified'&&<section className="panel">
     <h2>Loan portfolio dashboard</h2>
+    <button type="button" className="outline" onClick={()=>{setForm({});setPage('disbursements')}}>Disbursements</button>
+    {canRepay&&<button type="button" className="outline" onClick={()=>{setForm({});setPage('collections')}}>Collections</button>}
     <div className="metricrows">
      <Line label="Loan accounts" value={num(portfolio?.loan_accounts??lenderLoans.length)}/>
      <Line label="Active loans" value={num(portfolio?.active_loans??lenderLoans.filter(l=>l.status==='active').length)}/>
@@ -2268,7 +2292,7 @@ function App(){
    <Line label="Annual flat interest rate" value={`${num(selectedLoan.annual_flat_interest_percent)}%`}/>
    <Line label="Repayment schedule" value={selectedLoan.repayment_frequency}/>
   </div>
-  {page==='lender'&&canDisburse&&selectedLoan.status==='awaiting_disbursement'&&Number(selectedLoan.undisbursed_ghs)>0&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'disbursements')}>
+  {(page==='lender'||page==='disbursements')&&canDisburse&&selectedLoan.status==='awaiting_disbursement'&&Number(selectedLoan.undisbursed_ghs)>0&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'disbursements')}>
    <h3>Record loan disbursement</h3>
    <label className="field"><span>Amount (GH₵)</span><input required type="number" min="0.01" max={selectedLoan.undisbursed_ghs} step="0.01" value={form.loan_amount_ghs??''} onChange={e=>setForm({...form,loan_amount_ghs:e.target.value})}/></label>
    <label className="field"><span>Transfer reference</span><input required minLength={3} maxLength={100} value={form.loan_reference??''} onChange={e=>setForm({...form,loan_reference:e.target.value})}/></label>
@@ -2276,12 +2300,18 @@ function App(){
    <EvidenceRecorder key={`loan-${selectedLoan.id}-disbursement-${transactionRecorderKey}`} activity="disbursement" unit={null} requireFarmGps={false} onChange={video=>{setTransactionVideo(video);setTransactionEvidenceId(null)}} getChallenge={getEvidenceChallenge}/>
    <button className="primary" disabled={busy||!transactionVideo}>Record disbursement</button>
   </form>}
-  {page==='lender'&&canRepay&&selectedLoan.status==='active'&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'repayments')}>
+  {(page==='lender'||page==='collections')&&canRepay&&selectedLoan.status==='active'&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'repayments')}>
    <h3>Record loan repayment</h3>
    <label className="field"><span>Amount received (GH₵)</span><input required type="number" min="0.01" max={selectedLoan.total_scheduled_balance_ghs} step="0.01" value={form.loan_amount_ghs??''} onChange={e=>setForm({...form,loan_amount_ghs:e.target.value})}/></label>
    <label className="field"><span>Payment reference</span><input required minLength={3} maxLength={100} value={form.loan_reference??''} onChange={e=>setForm({...form,loan_reference:e.target.value})}/></label>
    <label className="field"><span>Payment date</span><input required type="date" max={localDate()} value={form.loan_transaction_date??''} onChange={e=>setForm({...form,loan_transaction_date:e.target.value})}/></label>
-   <EvidenceRecorder key={`loan-${selectedLoan.id}-repayment-${transactionRecorderKey}`} activity="repayment" unit={null} requireFarmGps={false} onChange={video=>{setTransactionVideo(video);setTransactionEvidenceId(null)}} getChallenge={getEvidenceChallenge}/>
+   {page==='collections'&&<label className="field">
+    <span><input type="checkbox" required checked={Boolean(form.collection_consent)}
+     onChange={e=>{setForm({...form,collection_consent:e.target.checked});if(!e.target.checked){setTransactionVideo(null);setTransactionEvidenceId(null)}}}/>
+     The customer consents to recording confirmation of the amount received.</span>
+   </label>}
+   {page==='collections'&&form.collection_consent&&<p>State the amount received and ask the customer to confirm it on camera.</p>}
+   {(page!=='collections'||form.collection_consent)&&<EvidenceRecorder key={`loan-${selectedLoan.id}-repayment-${transactionRecorderKey}`} activity="repayment" unit={null} requireFarmGps={false} onChange={video=>{setTransactionVideo(video);setTransactionEvidenceId(null)}} getChallenge={getEvidenceChallenge}/>}
    <p className="muted">Partial payments are applied to scheduled interest, then fees, then principal. Do not record a payment until the institution has verified receipt.</p>
    <button className="primary" disabled={busy||!transactionVideo}>Record repayment</button>
   </form>}

@@ -6,12 +6,12 @@ import hashlib
 import json
 import uuid
 from typing import Literal
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import update, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func
+from sqlalchemy import update, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func, or_
 from sqlalchemy.orm import Mapped, mapped_column
-from .main import Base, app, Db, CurrentUser, owned_farm, audit
+from .main import Base, app, Db, CurrentUser, Farm, User, owned_farm, audit
 from .lending import Institution, LoanApplication, LoanDecision, member, ghs
 
 TAG = ['Loan disbursement and recovery (manual ledger)']
@@ -516,6 +516,116 @@ def record_repayment(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
     }));db.commit()
     return view(db,loan)
 
+def collection_account_number(loan_id: int) -> str:
+    return f'AQUA-LOAN-{loan_id:06d}'
+
+
+@app.get('/finance/institutions/{institution_id}/collection-customers', tags=TAG)
+def collection_customers(institution_id: int, user: CurrentUser, db: Db,
+                         search: str = Query('', max_length=120), offset: int = Query(0, ge=0)):
+    member(db, institution_id, user.id, 'repay')
+    query = select(LoanAccount.id, User.full_name, Farm.name).join(
+        Farm, Farm.id == LoanAccount.farm_id,
+    ).join(User, User.id == Farm.owner_id).where(
+        LoanAccount.institution_id == institution_id, LoanAccount.status == 'active',
+    )
+    term = search.strip().lower()
+    if term:
+        number = term.removeprefix('aqua-loan-')
+        conditions = [func.lower(User.full_name).contains(term, autoescape=True),
+                      func.lower(Farm.name).contains(term, autoescape=True)]
+        if number.isascii() and number.isdecimal() and len(number) <= 9:
+            conditions.append(LoanAccount.id == int(number))
+        query = query.where(or_(*conditions))
+    rows = db.execute(query.order_by(User.full_name, LoanAccount.id).offset(offset).limit(26)).all()
+    return {'items': [
+        {'loan_id': loan_id, 'account_number': collection_account_number(loan_id),
+         'customer_name': customer, 'farm_name': farm}
+        for loan_id, customer, farm in rows[:25]
+    ], 'has_more': len(rows) > 25}
+
+
+@app.get('/finance/institutions/{institution_id}/disbursements', tags=TAG)
+def institution_disbursements(institution_id: int, user: CurrentUser, db: Db,
+                              offset: int = Query(0, ge=0)):
+    member(db, institution_id, user.id)
+    disbursed = select(
+        LoanDisbursement.loan_id,
+        func.sum(LoanDisbursement.amount_pesewas).label('amount'),
+    ).join(LoanAccount, LoanAccount.id == LoanDisbursement.loan_id).where(
+        LoanAccount.institution_id == institution_id,
+    ).group_by(LoanDisbursement.loan_id).subquery()
+    recovered = select(
+        LoanRepayment.loan_id,
+        func.sum(LoanRepayment.amount_pesewas).label('amount'),
+        func.sum(LoanRepayment.principal_pesewas).label('principal'),
+    ).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id).where(
+        LoanAccount.institution_id == institution_id,
+    ).group_by(LoanRepayment.loan_id).subquery()
+    amounts = select(
+        disbursed.c.loan_id, disbursed.c.amount.label('disbursed'),
+        func.coalesce(recovered.c.amount, 0).label('recovered'),
+        func.coalesce(recovered.c.principal, 0).label('principal'),
+    ).outerjoin(recovered, recovered.c.loan_id == disbursed.c.loan_id).subquery()
+
+    def summary(disbursed_amount, recovered_amount, principal_amount):
+        return {
+            'disbursed_ghs': ghs(disbursed_amount),
+            'recovered_ghs': ghs(recovered_amount),
+            'principal_recovered_ghs': ghs(principal_amount),
+            'principal_recovery_percent': round(100 * principal_amount / disbursed_amount, 2)
+            if disbursed_amount else None,
+        }
+
+    totals = db.execute(select(
+        func.coalesce(func.sum(amounts.c.disbursed), 0),
+        func.coalesce(func.sum(amounts.c.recovered), 0),
+        func.coalesce(func.sum(amounts.c.principal), 0),
+    )).one()
+    rows = db.execute(select(
+        amounts.c.loan_id, User.full_name, LoanAccount.status,
+        amounts.c.disbursed, amounts.c.recovered, amounts.c.principal,
+    ).select_from(amounts).join(LoanAccount, LoanAccount.id == amounts.c.loan_id).join(
+        Farm, Farm.id == LoanAccount.farm_id,
+    ).join(User, User.id == Farm.owner_id).order_by(
+        User.full_name, amounts.c.loan_id,
+    ).offset(offset).limit(26)).all()
+    return {'totals': summary(*totals), 'has_more': len(rows) > 25, 'items': [
+        {'loan_id': loan_id, 'account_number': collection_account_number(loan_id),
+         'customer_name': name, 'status': status, **summary(sent, paid, principal)}
+        for loan_id, name, status, sent, paid, principal in rows[:25]
+    ]}
+
+
+@app.get('/finance/institutions/{institution_id}/collections', tags=TAG)
+def daily_collections(institution_id: int, user: CurrentUser, db: Db,
+                      day: date | None = None, offset: int = Query(0, ge=0)):
+    member(db, institution_id, user.id, 'repay')
+    from .daily_reminders import local_now
+    day = day or local_now().date()
+    filters = (LoanAccount.institution_id == institution_id, LoanRepayment.paid_on == day)
+    query = select(LoanRepayment, User.full_name, LoanEvidence.id, LoanEvidence.media_type).select_from(
+        LoanRepayment,
+    ).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id).join(
+        Farm, Farm.id == LoanAccount.farm_id,
+    ).join(User, User.id == Farm.owner_id).outerjoin(
+        LoanEvidence, (LoanEvidence.loan_id == LoanRepayment.loan_id)
+        & (LoanEvidence.record_type == 'repayment') & (LoanEvidence.record_id == LoanRepayment.id),
+    ).where(*filters)
+    rows = db.execute(query.order_by(LoanRepayment.id.desc()).offset(offset).limit(26)).all()
+    total, count = db.execute(select(
+        func.coalesce(func.sum(LoanRepayment.amount_pesewas), 0), func.count(LoanRepayment.id),
+    ).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id).where(*filters)).one()
+    return {'day': day, 'total_ghs': ghs(total), 'count': count, 'has_more': len(rows) > 25,
+            'items': [
+                {'id': row.id, 'loan_id': row.loan_id, 'account_number': collection_account_number(row.loan_id),
+                 'customer_name': customer, 'amount_ghs': ghs(row.amount_pesewas), 'reference': row.reference,
+                 'posted_at': row.created_at, 'collector_id': row.recorded_by, 'evidence_id': evidence_id,
+                 'evidence_media_type': media_type}
+                for row, customer, evidence_id, media_type in rows[:25]
+            ]}
+
+
 @app.get('/finance/loans/{loan_id}',tags=TAG)
 def lender_loan(loan_id:int,user:CurrentUser,db:Db):
     return view(db,loan_for_view(db,loan_id,user))
@@ -574,6 +684,9 @@ def lender_portfolio(institution_id:int,user:CurrentUser,db:Db):
         'active_loans':sum(loan.status=='active' for loan in loans),
         'total_disbursements_ghs':ghs(totals['disbursed']),
         'total_collections_ghs':ghs(totals['collected']),
+        'principal_recovery_percent':round(
+            100 * (totals['disbursed'] - totals['outstanding_principal']) / totals['disbursed'], 2
+        ) if totals['disbursed'] else None,
         'outstanding_principal_ghs':ghs(totals['outstanding_principal']),
         'outstanding_interest_ghs':ghs(totals['outstanding_interest']),
         'outstanding_fees_ghs':ghs(totals['outstanding_fees']),
