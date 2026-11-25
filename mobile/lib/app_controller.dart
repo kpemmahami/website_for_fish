@@ -15,7 +15,7 @@ class AppController extends ChangeNotifier {
 
   static const defaultApiUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://10.0.2.2:8000',
+    defaultValue: 'https://aquafarm-ghana-backend.onrender.com',
   );
 
   final OfflineStore store;
@@ -83,16 +83,49 @@ class AppController extends ChangeNotifier {
   Future<void> configureApiUrl(String value) async {
     final normalized = value.trim().replaceFirst(RegExp(r'/+$'), '');
     final uri = Uri.tryParse(normalized);
-    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+    if (uri == null ||
+        !const ['https', 'http'].contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment) {
       throw const ApiException('Enter a valid API address, including http:// or https://.');
     }
+    if (normalized == apiBaseUrl) return;
+    if (token != null) await signOut();
     apiBaseUrl = normalized;
     await _preferences.setString('api_base_url', apiBaseUrl);
     api.close();
     api = ApiClient(baseUrl: apiBaseUrl, token: token);
     error = null;
     notifyListeners();
-    if (token != null) await refresh();
+  }
+
+  Future<String> requestPasswordRecovery(String email) async {
+    final result = await api.send('POST', '/auth/password-recovery/request', body: {
+      'portal': 'farmer',
+      'email': email.trim(),
+    }) as Map;
+    return result['message'] as String;
+  }
+
+  Future<String?> requestPhoneVerification() async {
+    final result = await api.send('POST', '/auth/me/phone-verification/request', body: {}) as Map;
+    return result['destination'] as String?;
+  }
+
+  Future<void> confirmPhoneVerification(String code) async {
+    final result = await api.send('POST', '/auth/me/phone-verification/confirm', body: {'code': code}) as Map;
+    final account = user;
+    if (account != null) {
+      user = {...account, 'phone_verified_at': result['phone_verified_at']};
+      notifyListeners();
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> loadAssignedUnits() async {
+    final results = await api.get('/staff/assigned-units') as List;
+    return results.map((row) => Map<String, dynamic>.from(row as Map)).toList();
   }
 
   void clearError() {

@@ -8,10 +8,10 @@ Start the FastAPI backend on port `8000`, then from this directory run:
 
 ```powershell
 flutter pub get
-flutter run
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000
 ```
 
-The app's default API address is `http://10.0.2.2:8000`, which reaches the host computer from an Android emulator. For a physical phone, open **Settings** in the app and enter the backend computer's reachable LAN address, for example `http://192.168.1.20:8000`. The phone and computer must be on the same network, and the backend firewall must allow the connection. Use HTTPS for deployments; debug Android builds allow cleartext HTTP for local development only.
+The app defaults to the live HTTPS AquaFarm backend. The command above selects a local backend from an Android emulator. On a physical phone, open **Settings** to use a reachable LAN address for debug testing. Changing the address signs out the current session. Debug Android builds allow cleartext HTTP for local development.
 
 ## Build and verify
 
@@ -25,6 +25,6 @@ The debug APK is written to `build\app\outputs\flutter-apk\app-debug.apk`.
 
 ## Current scope
 
-The MVP supports registration and login, farm and production-unit setup, stocking, feeding, mortality, sampling, water-quality entries, dashboard/report views, and offline queuing with retry. Operational submissions require a newly captured 15-second video and GPS; evidence is uploaded before the operation is submitted.
+The farmer app supports registration, approval status, email or phone sign-in, email recovery requests, saved-phone SMS verification, and a read-only assigned-units list. Password reset links open in the browser. It also supports farm and production-unit setup, stocking, feeding, mortality, sampling, water-quality entries, dashboards, reports, and offline queuing with retry. Operational submissions require a newly captured 15-second video and GPS. The app uploads evidence before submitting the operation.
 
-This is not yet a complete production release: sales and expense entry, loan servicing, exportable mobile reports, device/emulator acceptance testing, and production HTTPS deployment remain outstanding. Offline queued operations sync only when connectivity and valid backend authentication are available. Android SDK license acceptance, when required by Flutter tooling, must be performed by the developer.
+Sales and expense entry, loan servicing, exportable mobile reports, delegated staff operations, and device acceptance testing remain outstanding. Offline queued operations sync when connectivity and valid backend authentication are available. Android SDK license acceptance, when required by Flutter tooling, must be performed by the developer.

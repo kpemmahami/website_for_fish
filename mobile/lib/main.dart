@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'app_controller.dart';
+import 'account_pages.dart';
 import 'evidence_capture.dart';
 import 'offline_store.dart';
 
@@ -96,23 +97,19 @@ class ApprovalPendingPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Account pending approval', style: Theme.of(context).textTheme.headlineSmall),
-                const Text('An AquaFarm administrator needs to approve your account.'),
-                if (controller.error != null) Text(controller.error!),
-                FilledButton(
-                  onPressed: controller.loading ? null : controller.checkApproval,
-                  child: const Text('Check approval status'),
-                ),
-                TextButton(onPressed: controller.signOut, child: const Text('Sign out')),
-              ],
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text('Account pending approval', style: Theme.of(context).textTheme.headlineSmall),
+            const Text('An AquaFarm administrator needs to approve your account.'),
+            if (controller.error != null) Text(controller.error!),
+            FilledButton(
+              onPressed: controller.loading ? null : controller.checkApproval,
+              child: const Text('Check approval status'),
             ),
-          ),
+            PhoneVerificationPanel(controller: controller),
+            TextButton(onPressed: controller.signOut, child: const Text('Sign out')),
+          ],
         ),
       ),
     );
@@ -299,6 +296,16 @@ class _LoginPageState extends State<LoginPage> {
                                 )
                               : Text(_register ? 'Create account' : 'Sign in'),
                         ),
+                        if (!_register)
+                          TextButton(
+                            onPressed: controller.loading ? null : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(builder: (_) => PasswordRecoveryPage(
+                                controller: controller,
+                                email: _email.text.contains('@') ? _email.text.trim() : '',
+                              )),
+                            ),
+                            child: const Text('Forgot password?'),
+                          ),
                         TextButton(
                           onPressed: () => setState(() {
                             _register = !_register;
@@ -349,7 +356,7 @@ class _MobileHomeState extends State<MobileHome> {
     final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
-      builder: (context) => Padding(
+      builder: (context) => SingleChildScrollView(
         padding: EdgeInsets.fromLTRB(
           20,
           24,
@@ -361,6 +368,7 @@ class _MobileHomeState extends State<MobileHome> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text('Settings', style: Theme.of(context).textTheme.titleLarge),
+            PhoneVerificationPanel(controller: widget.controller),
             const SizedBox(height: 16),
             TextField(
               controller: address,
@@ -445,6 +453,13 @@ class _MobileHomeState extends State<MobileHome> {
                     label: Text('${controller.pendingCount}'),
                     child: const Icon(Icons.sync),
                   ),
+          ),
+          IconButton(
+            tooltip: 'Assigned production units',
+            icon: const Icon(Icons.assignment_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+              builder: (_) => AssignedUnitsPage(controller: controller),
+            )),
           ),
           IconButton(
             tooltip: 'Settings',
