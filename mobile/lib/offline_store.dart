@@ -11,8 +11,12 @@ class OfflineStore {
     final location = path.join(await getDatabasesPath(), 'aquafarm_mobile.db');
     _database = await openDatabase(
       location,
-      version: 1,
+      version: 2,
+      onUpgrade: (db, oldVersion, _) async {
+        if (oldVersion < 2) await _createCollections(db);
+      },
       onCreate: (db, version) async {
+        await _createCollections(db);
         await db.execute('''
           CREATE TABLE pending_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +53,38 @@ class OfflineStore {
       },
     );
     return _database!;
+  }
+
+  Future<void> _createCollections(Database db) => db.execute('''
+    CREATE TABLE pending_collections (
+      collection_id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      loan_id INTEGER NOT NULL,
+      amount TEXT NOT NULL,
+      video_path TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      device_recorded_at TEXT NOT NULL,
+      evidence_id INTEGER,
+      last_error TEXT
+    )
+  ''');
+
+  Future<void> queueCollection(Map<String, Object?> row) async {
+    await (await database).insert('pending_collections', row);
+  }
+
+  Future<List<Map<String, Object?>>> pendingCollections(String scope) async =>
+      (await database).query('pending_collections',
+        where: 'scope = ?', whereArgs: [scope], orderBy: 'captured_at, collection_id');
+
+  Future<void> updateCollection(String scope, String id, Map<String, Object?> values) async {
+    await (await database).update('pending_collections', values,
+      where: 'scope = ? AND collection_id = ?', whereArgs: [scope, id]);
+  }
+
+  Future<void> removeCollection(String scope, String id) async {
+    await (await database).delete('pending_collections',
+      where: 'scope = ? AND collection_id = ?', whereArgs: [scope, id]);
   }
 
   Future<int> queueRecord(Map<String, Object?> record) async {

@@ -1,3 +1,4 @@
+import 'institution_workspace.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:geolocator/geolocator.dart';
 
@@ -79,7 +80,9 @@ class _AppBootstrapState extends State<AppBootstrap> {
           animation: widget.controller,
           builder: (context, _) => widget.controller.user == null
               ? LoginPage(controller: widget.controller)
-              : widget.controller.user?['account_type'] == 'pending_farmer'
+              : widget.controller.isInstitution
+                  ? InstitutionWorkspace(controller: widget.controller)
+                  : widget.controller.user?['account_type'] == 'pending_farmer'
                   ? ApprovalPendingPage(controller: widget.controller)
                   : MobileHome(controller: widget.controller),
         );
@@ -315,6 +318,13 @@ class _LoginPageState extends State<LoginPage> {
                               ? 'Already have an account? Sign in'
                               : 'New to AquaFarm? Create an account'),
                         ),
+                        if (!_register)
+                          TextButton(
+                            onPressed: controller.loading ? null : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(builder: (_) => InstitutionSignIn(controller: controller)),
+                            ),
+                            child: const Text('Sign in as financial institution staff'),
+                          ),
                         const Divider(),
                         Text(
                           'API: ${controller.apiBaseUrl}',

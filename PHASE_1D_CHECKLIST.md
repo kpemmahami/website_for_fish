@@ -64,3 +64,7 @@ Field repayment retry support is implemented locally. The authenticated endpoint
 ### Monthly borrower SMS
 
 Monthly mode checks daily at the existing Ghana-time SMS scheduler hour. It sends at most one monthly reminder to each opted-in borrower with a verified phone and an unpaid active-loan installment due by month-end. The message directs the borrower to their repayment schedule. Existing installment-based delivery remains the default. Select monthly delivery with `AQUAFARM_LOAN_REMINDER_MODE=monthly` when `AQUAFARM_LOAN_REMINDERS_ENABLED` and the existing Hubtel configuration are enabled. Tests use a fake SMS sender. Hosted activation and delivery verification are tracked separately.
+
+### Flutter institution workspace
+
+Flutter now supports the institution login endpoint, SMS sign-in verification and initial password replacement. Verified institution memberships with collection access can open today's posted collections and search active borrower loan accounts. Flutter collection entry now captures a consented 15-second video with audio, queues repayments in app-private storage, and manually syncs by backend, staff account and institution. Android can open protected videos from the daily list. Customer results are cached in memory for the current screen. Queued payments persist across restarts and can be retried after reconnecting and signing in. New evidence uploads still use the existing 24-hour window. Native camera, video playback and restart acceptance with an isolated institution remain pending before release.

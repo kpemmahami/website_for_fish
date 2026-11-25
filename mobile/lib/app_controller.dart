@@ -39,6 +39,26 @@ class AppController extends ChangeNotifier {
   bool syncing = false;
   bool initialized = false;
 
+  bool get isInstitution => user?['account_type'] == 'institution';
+
+  Future<void> acceptInstitutionSession(String accessToken) async {
+    api.token = accessToken;
+    try {
+      final account = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
+      if (account['account_type'] != 'institution') {
+        throw const ApiException('An institution account is required.');
+      }
+      await _preferences.setString('access_token', accessToken);
+      token = accessToken;
+      user = account;
+      error = null;
+      notifyListeners();
+    } on Object {
+      api.token = token;
+      rethrow;
+    }
+  }
+
   Map<String, dynamic>? get selectedFarm {
     for (final farm in farms) {
       if (farm['id'] == selectedFarmId) return farm;
@@ -58,14 +78,14 @@ class AppController extends ChangeNotifier {
     _connectivitySubscription =
         Connectivity().onConnectivityChanged.listen((results) {
       if (results.any((result) => result != ConnectivityResult.none) &&
-          token != null) {
+          token != null && !isInstitution) {
         unawaited(syncPending());
       }
     });
     if (token != null) {
       try {
         user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
-        if (user?['account_type'] != 'pending_farmer') await refresh();
+        if (user?['account_type'] != 'pending_farmer' && !isInstitution) await refresh();
       } on ApiException catch (exception) {
         if (exception.statusCode == 401) {
           await signOut();
@@ -158,7 +178,7 @@ class AppController extends ChangeNotifier {
       api.token = token;
       await _preferences.setString('access_token', token!);
       user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
-      if (user?['account_type'] != 'pending_farmer') await refresh();
+      if (user?['account_type'] != 'pending_farmer' && !isInstitution) await refresh();
     } on Object catch (exception) {
       error = exception.toString();
     } finally {
@@ -192,7 +212,7 @@ class AppController extends ChangeNotifier {
       api.token = token;
       await _preferences.setString('access_token', token!);
       user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
-      if (user?['account_type'] != 'pending_farmer') await refresh();
+      if (user?['account_type'] != 'pending_farmer' && !isInstitution) await refresh();
     } on Object catch (exception) {
       error = exception.toString();
     } finally {
@@ -207,7 +227,7 @@ class AppController extends ChangeNotifier {
     notifyListeners();
     try {
       user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
-      if (user?['account_type'] != 'pending_farmer') await refresh();
+      if (user?['account_type'] != 'pending_farmer' && !isInstitution) await refresh();
     } on ApiException catch (exception) {
       if (exception.statusCode == 401) {
         await signOut();

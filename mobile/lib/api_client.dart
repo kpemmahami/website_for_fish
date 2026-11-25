@@ -93,6 +93,20 @@ class ApiClient {
     return _send(request, timeout: const Duration(minutes: 2));
   }
 
+  Future<int> uploadCollectionVideo(int loanId, String path, String capturedAt, String deviceRecordedAt) async {
+    final request = http.Request('POST', _uri('/finance/loans/$loanId/evidence', {
+      'record_type': 'repayment',
+      'captured_at': capturedAt,
+      'device_recorded_at': deviceRecordedAt,
+      'duration_seconds': '15',
+      'retry_upload': 'true',
+    }));
+    _addHeaders(request.headers, 'video/mp4');
+    request.bodyBytes = await File(path).readAsBytes();
+    final result = await _send(request, timeout: const Duration(minutes: 2)) as Map;
+    return result['id'] as int;
+  }
+
   void _addHeaders(Map<String, String> headers, String contentType) {
     headers['Content-Type'] = contentType;
     if (token != null) headers['Authorization'] = 'Bearer $token';

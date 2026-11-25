@@ -42,6 +42,7 @@ class EvidenceCapturePage extends StatefulWidget {
     required this.activity,
     this.cycleId,
     this.locationConfigured,
+    this.collection = false,
     super.key,
   });
 
@@ -53,6 +54,7 @@ class EvidenceCapturePage extends StatefulWidget {
   final String activity;
   final int? cycleId;
   final bool? locationConfigured;
+  final bool collection;
 
   @override
   State<EvidenceCapturePage> createState() => _EvidenceCapturePageState();
@@ -83,7 +85,7 @@ class _EvidenceCapturePageState extends State<EvidenceCapturePage> {
       final controller = CameraController(
         selected,
         ResolutionPreset.medium,
-        enableAudio: false,
+        enableAudio: widget.collection,
       );
       await controller.initialize();
       if (!mounted) {
@@ -171,8 +173,9 @@ class _EvidenceCapturePageState extends State<EvidenceCapturePage> {
       _secondsRemaining = 15;
     });
     try {
-      final challenge = await _prepareChallenge();
-      final position = await _getPosition();
+      final challenge = widget.collection ? null : await _prepareChallenge();
+      final position = widget.collection ? null : await _getPosition();
+      if (!mounted) return;
       final capturedAt = DateTime.now().toUtc().toIso8601String();
       setState(() {
         _challengeCode = challenge?['code'] as String?;
@@ -203,7 +206,7 @@ class _EvidenceCapturePageState extends State<EvidenceCapturePage> {
 
   Future<void> _finishRecording({
     required CameraController camera,
-    required Position position,
+    required Position? position,
     required String capturedAt,
     required Map<String, Object?>? challenge,
   }) async {
@@ -228,9 +231,9 @@ class _EvidenceCapturePageState extends State<EvidenceCapturePage> {
         videoPath: destination,
         capturedAt: capturedAt,
         deviceRecordedAt: DateTime.now().toUtc().toIso8601String(),
-        latitude: position.latitude,
-        longitude: position.longitude,
-        accuracy: position.accuracy < 1 ? 1 : position.accuracy,
+        latitude: position?.latitude ?? 0,
+        longitude: position?.longitude ?? 0,
+        accuracy: position == null || position.accuracy < 1 ? 1 : position.accuracy,
         challengeId: challenge?['id'] as int?,
         challengeCode: challenge?['code'] as String?,
       ));
@@ -264,7 +267,9 @@ class _EvidenceCapturePageState extends State<EvidenceCapturePage> {
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 8),
-          const Text('Gallery uploads are not accepted. Keep the farm activity and pond/unit in view.'),
+          Text(widget.collection
+            ? 'State the amount received and ask the customer to confirm it on camera.'
+            : 'Gallery uploads are not accepted. Keep the farm activity and pond/unit in view.'),
           const SizedBox(height: 16),
           AspectRatio(
             aspectRatio: camera?.value.isInitialized == true
