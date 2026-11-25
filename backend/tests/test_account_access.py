@@ -146,6 +146,13 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
     approval_path = f"/admin/farmers/{registration.json()['id']}/approve"
     assert client.post(approval_path, headers=farmer).status_code == 403
     admin = admin_headers()
+    queue_path = '/admin/farmers/pending'
+    assert client.get(queue_path, params={'search': email}, headers=farmer).status_code == 403
+    matching = client.get(queue_path, params={'search': email.upper()}, headers=admin)
+    assert matching.status_code == 200
+    assert [row['id'] for row in matching.json()['items']] == [registration.json()['id']]
+    assert client.get(queue_path, params={'search': 'no-such-account@invalid.example'},
+                      headers=admin).json()['items'] == []
     assert registration.json()['id'] in {
         row['id'] for row in client.get('/admin/farmers/pending', headers=admin).json()['items']
     }
@@ -264,6 +271,12 @@ def test_only_owner_can_prepare_an_administrator_without_granting_access(monkeyp
     account_id = created.json()['id']
     row = client.get(path, headers=owner, params={'search': payload['email']}).json()['items'][0]
     assert row['pending_activation'] is True
+    pending = client.get(path, headers=owner, params={'pending_only': True})
+    assert pending.status_code == 200
+    assert account_id in {entry['id'] for entry in pending.json()['items']}
+    assert all(entry['pending_activation'] for entry in pending.json()['items'])
+    assert client.get(path, headers=login('admin', ordinary_email),
+                      params={'pending_only': True}).status_code == 403
     assert row['phone_number'] == '+233541234567'
     assert client.post(path, headers=owner, json={**payload, 'email': 'other-pending@example.com',
                                                  'phone_number': '+233541234567'}).status_code == 409
