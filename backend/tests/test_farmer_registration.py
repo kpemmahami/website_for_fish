@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
-from .test_api import client
+from .test_api import approve_test_registration, client
 from app.main import SessionLocal, User, app, configure_cors, get_db, password_hash
 from app.processing import ProcessingBusiness
 
@@ -55,6 +55,24 @@ def test_registration_validation_does_not_echo_sensitive_input():
         assert any(field in item['loc'] for item in response.json()['detail'])
         assert all(set(item) == {'loc','type'} for item in response.json()['detail'])
         assert PASSWORD not in response.text
+
+
+def test_normalized_phone_conflict_does_not_create_or_change_account():
+    phone = '0245550188'
+    body = {'full_name': 'Phone claim test', 'password': PASSWORD}
+    first = client.post(PATH, json={**body, 'email': 'phone-claim-first@example.com', 'phone_number': phone})
+    second_email = 'phone-claim-second@example.com'
+    equivalent = '+233 24 555 0188'
+    duplicate = client.post(PATH, json={**body, 'email': second_email, 'phone_number': equivalent})
+    assert duplicate.status_code == 409
+    second = client.post(PATH, json={**body, 'email': second_email, 'phone_number': '0245550189'})
+    approve_test_registration(second)
+    session = client.post('/auth/farmer/login', json={'email': second_email, 'password': PASSWORD}).json()
+    headers = {'Authorization': f"Bearer {session['access_token']}"}
+    changed = client.patch('/auth/me', headers=headers, json={'phone_number': equivalent})
+    assert changed.status_code == 409
+    assert client.get('/auth/me', headers=headers).json()['phone_number'] == '+233245550189'
+    assert first.json()['phone_number'] == '+233245550188'
 
 
 def test_registration_rolls_back_and_reports_database_error_safely(monkeypatch, caplog):

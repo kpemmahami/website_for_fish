@@ -114,6 +114,7 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
  if(registration){
   if(status===0)return 'Unable to connect to the server. Check your internet connection.';
   if(status===409&&detail==='Email already registered')return 'This email address is already registered.';
+  if(status===409&&detail==='This phone number is already assigned to an account')return 'This phone number is already assigned to an account.';
   if(status===422||status===400)return validationMessage(detail)||'Please check the information you entered.';
   if(status===429)return 'Too many requests. Please wait and try again.';
   return 'Registration is temporarily unavailable. Please try again.';
@@ -132,6 +133,7 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
  if(status===404)return friendlyResource(path)+' not found.';
  if(status>=500)return actionFailure(path,method);
  if(typeof detail==='string'){
+   if(status===409&&detail==='This phone number is already assigned to an account')return detail+'.';
    if(actionable.has(detail))return detail.endsWith('.')?detail:detail+'.';
    if(/^Insufficient feed stock\. Only [0-9]+(?:\.[0-9]+)? kg is available\.$/.test(detail))return detail;
  }

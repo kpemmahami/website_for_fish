@@ -14,7 +14,7 @@ def test_institution_staff_lifecycle():
     root = f'/finance/institutions/{institution_id}/staff'
     staff_email = 'new-bank-staff@example.com'
     payload = {'email': staff_email, 'full_name': 'Ali', 'role': 'loan_officer',
-               'phone_number': '+233241234567', 'password': 'eight123'}
+               'phone_number': '+233545550173', 'password': 'eight123'}
     existing = signup('existing-bank-staff@example.com')
     assert client.post(root, json=payload).status_code == 401
     assert client.post(root, json=payload, headers=existing).status_code == 404

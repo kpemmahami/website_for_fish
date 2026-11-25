@@ -4,7 +4,7 @@ import json
 import pytest
 from sqlalchemy import select
 
-from .test_api import client
+from .test_api import client, next_test_phone
 from app.administration import AdminSetup, bootstrap_admin
 from app.main import AuditLog, Register, SessionLocal, User, new_user
 
@@ -64,7 +64,7 @@ def admin_headers():
 
 def register_institution(email, institution):
     response = client.post('/finance/admin/institutions', headers=admin_headers(), json={
-        **credentials(email), 'phone_number': '0245550106', 'institution': institution,
+        **credentials(email), 'phone_number': next_test_phone(), 'institution': institution,
     })
     assert response.status_code == 201, response.text
     return login('institution', email), response
@@ -97,7 +97,7 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
     assert client.post('/auth/admin/invitations', headers=farmer, json={'email': 'abc@example.com'}).status_code == 404
 
     institution = {'name': 'Pending Test Bank', 'institution_type': 'bank', 'account_number': 'TEST-001'}
-    payload = {**credentials('unapproved-institution@example.com'), 'phone_number': '0245550106', 'institution': institution}
+    payload = {**credentials('unapproved-institution@example.com'), 'phone_number': next_test_phone(), 'institution': institution}
     assert client.post('/auth/institution/register', json=payload).status_code == 404
     assert client.post('/finance/institutions', json=payload).status_code == 405
     assert client.post('/finance/admin/institutions', json=payload).status_code == 401
@@ -107,7 +107,7 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
     lender_email = 'access-lender@example.com'
     lender, response = register_institution(lender_email, institution)
     assert client.post('/finance/admin/institutions', headers=admin_headers(), json={
-        **credentials(lender_email), 'phone_number': '0245550106', 'institution': institution,
+        **credentials(lender_email), 'phone_number': next_test_phone(), 'institution': institution,
     }).status_code == 409
     institution_id = response.json()['id']
     base = f'/finance/institutions/{institution_id}'
@@ -291,7 +291,7 @@ def test_institution_registration_rolls_back_partial_provisioning(monkeypatch):
     email = 'rollback-institution@example.com'
     name = 'Rollback Test Bank'
     response = client.post('/finance/admin/institutions', headers=admin_headers(), json={
-        **credentials(email), 'phone_number': '0245550106',
+        **credentials(email), 'phone_number': next_test_phone(),
         'institution': {'name': name, 'institution_type': 'bank', 'account_number': 'TEST-ROLLBACK'},
     })
     assert response.status_code == 409

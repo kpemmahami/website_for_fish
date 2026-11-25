@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 import uuid
 
-from .test_api import approve_test_registration, client
+from .test_api import approve_test_registration, client, next_test_phone
 
 def signup(email):
-    response = client.post('/auth/register',json={'full_name':'Farm Owner','phone_number':'0245550102','email':email,'password':'a-very-long-password-123'})
+    response = client.post('/auth/register',json={'full_name':'Farm Owner','phone_number':next_test_phone(),'email':email,'password':'a-very-long-password-123'})
     approve_test_registration(response)
     token = client.post('/auth/login',json={'email':email,'password':'a-very-long-password-123'}).json()['access_token']
     return {'Authorization':f'Bearer {token}'}

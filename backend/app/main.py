@@ -19,7 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
 from pwdlib import PasswordHash
-from sqlalchemy import DateTime, ForeignKey, String, Float, Text, Boolean, create_engine, false, select
+from sqlalchemy import DateTime, ForeignKey, Index, String, Float, Text, Boolean, create_engine, false, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -41,11 +41,13 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = 'users'
+    __table_args__ = (Index('uq_users_phone_number_claim', 'phone_number_claim', unique=True),)
     id: Mapped[int] = mapped_column(primary_key=True)
     full_name: Mapped[str] = mapped_column(String(120))
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     phone_number: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    phone_number_claim: Mapped[str | None] = mapped_column(String(16))
     recovery_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     password_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_suspended: Mapped[bool] = mapped_column(Boolean, server_default=false())
@@ -144,7 +146,7 @@ class UserOut(BaseModel):
     is_platform_owner: bool = False
 
 class ContactUpdate(BaseModel):
-    phone_number: str | None = Field(default=None, pattern=r'^\+[1-9]\d{7,14}$')
+    phone_number: PhoneNumber | None = None
     sms_daily_records_enabled: bool = False
     sms_loan_reminders_enabled: bool = False
 
@@ -295,6 +297,28 @@ def new_user(data: Register, account_type: str) -> User:
                 password_hash=password_hash.hash(data.password), account_type=account_type)
 
 
+def duplicate_phone_claim(error: IntegrityError) -> bool:
+    original = error.orig
+    if getattr(original, 'sqlstate', None) == '23505':
+        return getattr(getattr(original, 'diag', None), 'constraint_name', None) == 'uq_users_phone_number_claim'
+    return getattr(original, 'sqlite_errorname', None) == 'SQLITE_CONSTRAINT_UNIQUE' and str(original).endswith(
+        'users.phone_number_claim',
+    )
+
+
+def assign_phone_number(db: Session, user: User, phone: str | None) -> None:
+    if phone == user.phone_number:
+        return
+    if phone is not None:
+        conflicts = select(User.id).where(User.phone_number == phone)
+        if user.id is not None:
+            conflicts = conflicts.where(User.id != user.id)
+        if db.scalar(conflicts.limit(1)) is not None:
+            raise HTTPException(409, 'This phone number is already assigned to an account')
+    user.phone_number = phone
+    user.phone_number_claim = phone
+
+
 FARMER_REGISTRATION_PATHS = {'/auth/register', '/auth/farmer/register'}
 registration_log = logging.getLogger('aquafarm.registration')
 
@@ -334,9 +358,11 @@ def duplicate_email(error: IntegrityError) -> bool:
 @app.post('/auth/farmer/register', response_model=UserOut, status_code=201)
 def register(data: FarmerRegister, db: Db):
     user = new_user(data, 'pending_farmer')
-    user.phone_number = data.phone_number
-    db.add(user)
     try:
+        if db.scalar(select(User.id).where(User.email == user.email)) is not None:
+            raise HTTPException(409, 'Email already registered')
+        assign_phone_number(db, user, data.phone_number)
+        db.add(user)
         db.flush()
         if data.business_type != 'farmer':
             from .processing import ProcessingBusiness
@@ -347,6 +373,8 @@ def register(data: FarmerRegister, db: Db):
         db.rollback()
         if isinstance(error, IntegrityError) and duplicate_email(error):
             raise HTTPException(status_code=409, detail='Email already registered') from None
+        if isinstance(error, IntegrityError) and duplicate_phone_claim(error):
+            raise HTTPException(409, 'This phone number is already assigned to an account') from None
         original = getattr(error, 'orig', None)
         registration_log.error('Farmer registration failed. exception=%s sqlstate=%s reason=%s',
                                type(error).__name__, getattr(original, 'sqlstate', None),
@@ -418,10 +446,16 @@ def me(user: AuthenticatedUser, db: Db):
 
 @app.patch('/auth/me', response_model=UserOut)
 def update_contact(data: ContactUpdate, user: CurrentUser, db: Db):
-    user.phone_number = data.phone_number
+    assign_phone_number(db, user, data.phone_number)
     user.sms_daily_records_enabled = data.sms_daily_records_enabled
     user.sms_loan_reminders_enabled = data.sms_loan_reminders_enabled
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        if duplicate_phone_claim(error):
+            raise HTTPException(409, 'This phone number is already assigned to an account') from None
+        raise
     db.refresh(user)
     return user
 

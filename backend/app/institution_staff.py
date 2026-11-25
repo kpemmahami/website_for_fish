@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .lending import InstitutionMember, member
-from .main import AuditLog, Base, CurrentUser, Db, Register, User, app, audit, new_user
+from .main import AuditLog, Base, CurrentUser, Db, Register, User, app, assign_phone_number, audit, duplicate_phone_claim, new_user
 from .phone_numbers import PhoneNumber
 
 StaffRole = Literal['loan_officer', 'credit_manager', 'disbursement', 'collections', 'viewer', 'officer', 'reviewer']
@@ -85,7 +85,7 @@ def list_staff(institution_id: int, user: CurrentUser, db: Db):
 def create_staff(institution_id: int, data: CreateStaffIn, user: CurrentUser, db: Db):
     member(db, institution_id, user.id, 'manage_staff')
     staff_user = new_user(data, 'institution')
-    staff_user.phone_number = data.phone_number
+    assign_phone_number(db, staff_user, data.phone_number)
     db.add(staff_user)
     try:
         db.flush()
@@ -97,8 +97,10 @@ def create_staff(institution_id: int, data: CreateStaffIn, user: CurrentUser, db
             'user_id': staff_user.id, 'role': data.role,
         })
         db.commit()
-    except IntegrityError:
+    except IntegrityError as error:
         db.rollback()
+        if duplicate_phone_claim(error):
+            raise HTTPException(409, 'This phone number is already assigned to an account') from None
         raise HTTPException(409, 'An account with this email already exists') from None
     return {'user_id': staff_user.id, 'role': data.role, 'status': 'active'}
 

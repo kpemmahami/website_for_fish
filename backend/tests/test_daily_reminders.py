@@ -62,7 +62,7 @@ def test_missing_feeding_flag_and_opted_in_sms_is_sent_once():
     assert no_phone.status_code == 422
     contact = client.patch(
         '/auth/me',
-        json={'phone_number':'+233541234567','sms_daily_records_enabled':True},
+        json={'phone_number':'+233545550171','sms_daily_records_enabled':True},
         headers=farmer,
     )
     assert contact.status_code == 200, contact.text
@@ -81,7 +81,7 @@ def test_missing_feeding_flag_and_opted_in_sms_is_sent_once():
         assert reminder.status == 'sent'
         assert reminder.provider_message_id == 'hubtel-message-123'
     assert len(sent) == 1
-    assert sent[0][0] == '+233541234567'
+    assert sent[0][0] == '+233545550171'
     assert 'no feeding record' in sent[0][1]
 
 

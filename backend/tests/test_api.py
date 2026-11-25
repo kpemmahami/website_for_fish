@@ -1,6 +1,7 @@
 import os
 import tempfile
 from datetime import datetime, timezone
+from itertools import count
 from urllib.parse import urlencode
 
 test_postgres_url = os.getenv('AQUAFARM_TEST_POSTGRES_URL')
@@ -34,6 +35,11 @@ from app.main import SessionLocal, User, app
 
 client = TestClient(app)
 _loan_video_number = 0
+_phone_sequence = count(1)
+
+
+def next_test_phone():
+    return f"+23325{next(_phone_sequence):07d}"
 
 
 def approve_test_registration(response):
@@ -61,7 +67,7 @@ def upload_loan_video(headers, farm_id, record_type, loan_id=None):
 
 def test_farm_ownership():
     def signup(email):
-        r = client.post('/auth/register', json={'full_name':'Test Farmer','phone_number':'0245550101','email':email,'password':'a-very-long-password-123'})
+        r = client.post('/auth/register', json={'full_name':'Test Farmer','phone_number':next_test_phone(),'email':email,'password':'a-very-long-password-123'})
         approve_test_registration(r)
         token = client.post('/auth/login', json={'email':email,'password':'a-very-long-password-123'}).json()['access_token']
         return {'Authorization': f'Bearer {token}'}

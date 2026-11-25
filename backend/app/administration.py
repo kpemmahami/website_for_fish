@@ -12,7 +12,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import (
-    AdminRegister, Base, CurrentUser, Db, User, app, audit, new_user, require_platform_admin,
+    AdminRegister, Base, CurrentUser, Db, User, app, assign_phone_number, audit,
+    duplicate_phone_claim, new_user, require_platform_admin,
 )
 from .phone_numbers import PhoneNumber, normalize_phone_number
 
@@ -39,10 +40,11 @@ def bootstrap_admin(data: AdminRegister, db: Session, *, phone_number: str) -> N
     phone = normalize_phone_number(phone_number)
     if phone is None:
         raise ValueError('Enter a Ghanaian or international mobile phone number')
-    if db.scalar(select(User.id).where(User.account_type == 'admin', User.phone_number == phone).limit(1)):
-        raise ValueError('The number is already assigned to a platform administrator')
     user = new_user(data, 'admin')
-    user.phone_number = phone
+    try:
+        assign_phone_number(db, user, phone)
+    except HTTPException as error:
+        raise ValueError(error.detail) from None
     db.add(user)
     try:
         db.flush()
@@ -51,6 +53,8 @@ def bootstrap_admin(data: AdminRegister, db: Session, *, phone_number: str) -> N
         db.commit()
     except IntegrityError as exc:
         db.rollback()
+        if duplicate_phone_claim(exc):
+            raise ValueError('This phone number is already assigned to an account') from None
         raise ValueError('Setup already completed or email already registered') from exc
 
 
@@ -129,21 +133,19 @@ def prepare_administrator(data: PendingAdministratorIn, user: CurrentUser, db: D
     require_platform_owner(user, db)
     phone = data.phone_number
     db.scalar(select(AdminSetup.id).where(AdminSetup.id == 1).with_for_update())
-    if db.scalar(select(User.id).where(
-        User.account_type.in_(('admin', 'pending_admin')), User.phone_number == phone,
-    ).limit(1)) is not None:
-        raise HTTPException(409, 'This phone number is already assigned to an administrator')
     account = new_user(AdminRegister(
         full_name=data.full_name, email=data.email, password=secrets.token_urlsafe(32),
     ), 'pending_admin')
-    account.phone_number = phone
+    assign_phone_number(db, account, phone)
     db.add(account)
     try:
         db.flush()
         audit(db, user, 'prepare_administrator', 'platform_admin', account.id)
         db.commit()
-    except IntegrityError:
+    except IntegrityError as error:
         db.rollback()
+        if duplicate_phone_claim(error):
+            raise HTTPException(409, 'This phone number is already assigned to an account') from None
         raise HTTPException(409, 'An account with this email already exists') from None
     return {'id': account.id, 'pending_activation': True}
 

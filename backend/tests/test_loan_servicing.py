@@ -163,7 +163,7 @@ def test_custom_schedule_reminders_and_portfolio_metrics():
     assert reminders.json()[0]['status']=='upcoming'
     assert reminders.json()[0]['amount_due_to_date_ghs']==5650
     contact=client.patch('/auth/me',json={
-        'phone_number':'+233541234567',
+        'phone_number':'+233545550172',
         'sms_daily_records_enabled':False,
         'sms_loan_reminders_enabled':True,
     },headers=farmer)
@@ -180,7 +180,7 @@ def test_custom_schedule_reminders_and_portfolio_metrics():
         assert reminder.status=='sent'
         assert reminder.provider_message_id=='loan-reminder-message-1'
     assert len(sent)==1
-    assert sent[0][0]=='+233541234567'
+    assert sent[0][0]=='+233545550172'
     assert 'is due' in sent[0][1]
     with SessionLocal() as db:
         installment=db.query(LoanInstallment).filter_by(loan_id=loan_id,number=1).one()

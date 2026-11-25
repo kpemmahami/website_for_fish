@@ -114,7 +114,7 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Email or registered phone sign-in across all three portals | Newly implemented and locally verified |
 | Compulsory normalized numbers for farmer, processor, integrated, institution administrator, institution staff and platform administrator creation | Newly implemented and locally verified |
 | Required phone enrollment for farm staff and legacy profile completion | Partially implemented |
-| Phone conflict review and database-level identity uniqueness | Not implemented |
+| Duplicate phone prevention on new assignments and legacy conflict review | Newly implemented and locally verified |
 | Authenticator enrollment and login MFA for newly provisioned administrators | Newly implemented and locally verified |
 | Existing administrator MFA enrollment and authenticator recovery | Not implemented |
 | General phone verification and trusted devices | Not implemented |
@@ -130,6 +130,19 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 ## Remaining implementation order
 
 New farmer and processor signup requires a phone number. The web form and Flutter source send it, so release a compatible Flutter build alongside the backend if users register through the mobile app. Existing accounts keep email sign-in. Ghanaian local, country-code, and international input are normalized by the same service as phone sign-in. This change validates formatting. Ownership verification and conflict handling have separate rollout steps.
+
+Revision `0034_phone_claims` adds a nullable phone claim and a unique index. Apply it before rolling out the backend. Existing numbers stay in place, including shared numbers. New assignments check existing phone records and reserve the normalized number in the same transaction. The unique index rejects simultaneous claims for the same number.
+
+An authorized Neon operator can review shared numbers using the following read-only query. Keep its output private. Confirm ownership with the account holders before resolving conflicts. Email sign-in is available during review.
+
+```sql
+SELECT phone_number, count(*) AS account_count
+FROM public.users
+WHERE phone_number IS NOT NULL
+GROUP BY phone_number
+HAVING count(*) > 1
+ORDER BY account_count DESC, phone_number;
+```
 
 New farmer and processor accounts can sign in and check their status. Operational API requests are denied while approval is pending. A platform administrator can approve the account from **Super Admin → Farmer and processor approvals**. The decision is audited, and the user can refresh the status screen to open the dashboard. This uses the existing account type and audit tables and requires no new migration.
 

@@ -10,6 +10,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstr
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import Base, app, Db, CurrentUser, User, Farm, owned_farm, audit, Register, new_user, require_platform_admin
+from .main import assign_phone_number, duplicate_phone_claim
 from .dashboard import build_dashboard
 from .phone_numbers import PhoneNumber
 
@@ -493,15 +494,17 @@ def add_institution(data, user, db):
 def register_institution(data: InstitutionRegistration, administrator: CurrentUser, db: Db):
     require_platform_admin(administrator)
     user = new_user(data, 'institution')
-    user.phone_number = data.phone_number
+    assign_phone_number(db, user, data.phone_number)
     db.add(user)
     try:
         db.flush()
         institution = add_institution(data.institution, user, db)
         audit(db, administrator, 'provision', 'finance_institution', institution.id)
         db.commit()
-    except IntegrityError:
+    except IntegrityError as error:
         db.rollback()
+        if duplicate_phone_claim(error):
+            raise HTTPException(409, 'This phone number is already assigned to an account') from None
         raise HTTPException(409, 'Email already registered')
     return institution_view(institution)
 
