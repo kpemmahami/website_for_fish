@@ -200,6 +200,8 @@ async def store_loan_evidence(
     duration_seconds: int,
     user,
     db,
+    *,
+    retry_upload: bool = False,
 ):
     from .evidence import MAX_VIDEO_BYTES, evidence_directory
 
@@ -246,7 +248,15 @@ async def store_loan_evidence(
         if not valid_header:
             raise HTTPException(415, 'Video file content does not match its media type')
         sha256 = digest.hexdigest()
-        if db.scalar(select(LoanEvidence.id).where(LoanEvidence.farm_id == farm_id, LoanEvidence.sha256 == sha256)) is not None:
+        existing = db.scalar(select(LoanEvidence).where(
+            LoanEvidence.farm_id == farm_id, LoanEvidence.sha256 == sha256,
+        ))
+        if existing is not None:
+            if (retry_upload and existing.loan_id == loan_id
+                    and existing.record_type == record_type and existing.uploaded_by == user.id
+                    and (root / existing.storage_name).is_file()):
+                path.unlink()
+                return loan_evidence_view(existing)
             raise HTTPException(409, 'Duplicate loan video evidence already exists for this farm')
         evidence = LoanEvidence(
             farm_id=farm_id,
@@ -361,11 +371,12 @@ async def upload_application_evidence(
 async def upload_transaction_evidence(
     loan_id:int,request:Request,user:CurrentUser,db:Db,
     record_type:Literal['disbursement','repayment'],
-    captured_at:datetime,device_recorded_at:datetime,duration_seconds:int,
+    captured_at:datetime,device_recorded_at:datetime,duration_seconds:int, retry_upload:bool=False,
 ):
     loan=loan_for_lender(db,loan_id,user,'disburse' if record_type=='disbursement' else 'repay')
     return await store_loan_evidence(
-        loan.farm_id,record_type,loan.id,request,captured_at,device_recorded_at,duration_seconds,user,db)
+        loan.farm_id,record_type,loan.id,request,captured_at,device_recorded_at,duration_seconds,user,db,
+        retry_upload=retry_upload and record_type=='repayment')
 
 
 @app.get('/finance/loan-evidence/{evidence_id}/video',tags=TAG)
@@ -488,10 +499,51 @@ def record_disbursement(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
 
 @app.post('/finance/loans/{loan_id}/repayments',status_code=201,tags=TAG)
 def record_repayment(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
-    loan=loan_for_lender(db,loan_id,user,'repay')
-    if loan.status!='active': raise HTTPException(409,'Loan is not active')
-    if db.scalar(select(LoanRepayment.id).where(LoanRepayment.loan_id==loan.id,LoanRepayment.reference==data.reference)) is not None:
-        raise HTTPException(409,'Repayment reference already recorded')
+    if data.reference.upper().startswith('COLLECTION-'):
+        raise HTTPException(422, 'This reference prefix is reserved for field collections')
+    loan = loan_for_lender(db, loan_id, user, 'repay')
+    post_repayment(db, loan, data, user)
+    return view(db, loan)
+
+
+class FieldRepaymentIn(BaseModel):
+    collection_id: uuid.UUID
+    amount_ghs: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    transaction_date: date
+    evidence_id: int = Field(gt=0)
+    customer_consented: Literal[True]
+
+
+@app.post('/finance/loans/{loan_id}/field-repayments', tags=TAG)
+def record_field_repayment(loan_id: int, data: FieldRepaymentIn, user: CurrentUser, db: Db):
+    loan = loan_for_lender(db, loan_id, user, 'repay')
+    transaction = post_repayment(db, loan, TransactionIn(
+        amount_ghs=data.amount_ghs, reference=f'COLLECTION-{data.collection_id}',
+        transaction_date=data.transaction_date, evidence_id=data.evidence_id,
+    ), user, field_collection=True)
+    return {'id': transaction.id, 'reference': transaction.reference,
+            'amount_ghs': ghs(transaction.amount_pesewas), 'posted_at': transaction.created_at}
+
+
+def post_repayment(db, loan, data, user, *, field_collection=False):
+    # Acquire the database write lock before reading any repayment balances.
+    db.execute(update(LoanAccount).where(LoanAccount.id == loan.id).values(status=LoanAccount.status))
+    db.refresh(loan)
+    existing = db.scalar(select(LoanRepayment).where(
+        LoanRepayment.loan_id == loan.id, LoanRepayment.reference == data.reference,
+    ))
+    if existing is not None:
+        evidence = db.get(LoanEvidence, data.evidence_id) if field_collection else None
+        if (field_collection and existing.recorded_by == user.id
+                and existing.amount_pesewas == cents(data.amount_ghs)
+                and existing.paid_on == data.transaction_date
+                and evidence is not None and evidence.record_type == 'repayment'
+                and evidence.loan_id == loan.id and evidence.record_id == existing.id
+                and evidence.uploaded_by == user.id):
+            return existing
+        raise HTTPException(409, 'Repayment reference already recorded')
+    if loan.status != 'active':
+        raise HTTPException(409, 'Loan is not active')
     if data.transaction_date>date.today(): raise HTTPException(422,'Future repayment cannot be recorded')
     amount=cents(data.amount_ghs)
     disbursed,paid_p,paid_i,interest=sums(db,loan)
@@ -513,8 +565,9 @@ def record_repayment(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
     audit(db,user,'repay','loan_account',loan.id,json.dumps({
         'amount_ghs':float(data.amount_ghs),'reference':data.reference,'evidence_id':evidence.id,
         'interest_ghs':ghs(interest_part),'fees_ghs':ghs(fees_part),'principal_ghs':ghs(principal_part),
+        **({'customer_consented': True} if field_collection else {}),
     }));db.commit()
-    return view(db,loan)
+    return transaction
 
 def collection_account_number(loan_id: int) -> str:
     return f'AQUA-LOAN-{loan_id:06d}'

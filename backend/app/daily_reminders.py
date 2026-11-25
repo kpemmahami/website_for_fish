@@ -1,4 +1,5 @@
 """Daily feeding-record status and opt-in Hubtel SMS reminders."""
+from calendar import monthrange
 from datetime import date, datetime, time, timedelta, timezone
 import logging
 import os
@@ -9,7 +10,7 @@ import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import HTTPException
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, func, select
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -272,11 +273,11 @@ def reserve_loan_reminder(db, user_id: int, loan_id: int, installment_number: in
                           reminder_key: str, reminder_type: str, today: date, at: datetime):
     reminder = db.scalar(select(LoanSmsReminder).where(LoanSmsReminder.reminder_key == reminder_key))
     if reminder is not None:
-        if reminder.status != 'failed':
+        claimed = db.execute(update(LoanSmsReminder).where(
+            LoanSmsReminder.id == reminder.id, LoanSmsReminder.status == 'failed',
+        ).values(status='sending', last_error=None, created_at=at))
+        if claimed.rowcount != 1:
             return None
-        reminder.status = 'sending'
-        reminder.last_error = None
-        reminder.created_at = at
     else:
         reminder = LoanSmsReminder(
             user_id=user_id,
@@ -303,15 +304,19 @@ def deliver_loan_sms_reminders(
     db,
     at: datetime | None = None,
     sender: Callable[[str, str], str | None] = hubtel_send_sms,
+    *, monthly: bool = False,
 ) -> int:
     from .loan_servicing import LoanAccount, LoanInstallment, LoanRepayment
 
     current = local_now(at)
     today = current.date()
-    upcoming_cutoff = today + timedelta(days=7)
+    upcoming_cutoff = (today.replace(day=monthrange(today.year, today.month)[1])
+                       if monthly else today + timedelta(days=7))
+    eligibility = (User.phone_verified_at.is_not(None), User.is_suspended.is_(False)) if monthly else ()
     users = db.scalars(select(User).where(
         User.sms_loan_reminders_enabled.is_(True),
         User.phone_number.is_not(None),
+        *eligibility,
     ).order_by(User.id)).all()
     sent_count = 0
     for user in users:
@@ -347,7 +352,12 @@ def deliver_loan_sms_reminders(
                 previous_unpaid = unpaid_to_date
                 if installment_unpaid <= 0:
                     continue
-                if installment.due_on < today:
+                if monthly and installment.due_on <= upcoming_cutoff:
+                    reminder_type = 'monthly'
+                    key = f'monthly:{user.id}:{today:%Y-%m}'
+                elif monthly:
+                    continue
+                elif installment.due_on < today:
                     reminder_type = 'overdue'
                     key = f'overdue:{loan.id}:{installment.number}:{today.isoformat()}'
                 elif installment.due_on <= upcoming_cutoff:
@@ -366,7 +376,10 @@ def deliver_loan_sms_reminders(
                     reminder.last_error = 'Opted-in user has no phone number'
                     db.commit()
                     continue
-                if reminder_type == 'overdue':
+                if monthly:
+                    message = ('AquaFarm monthly loan reminder: please review your repayment schedule '
+                               'in AquaFarm or contact your financial institution about payments due.')
+                elif reminder_type == 'overdue':
                     message = (
                         f'AquaFarm loan reminder: instalment {installment.number} on loan '
                         f'{loan.id} was due {installment.due_on.isoformat()} and is overdue. '
@@ -391,6 +404,8 @@ def deliver_loan_sms_reminders(
                 reminder.last_error = None
                 db.commit()
                 sent_count += 1
+                if monthly:
+                    break
     return sent_count
 
 
@@ -401,7 +416,8 @@ def scheduled_delivery():
         if daily_enabled:
             deliver_daily_record_reminders(db)
         if loans_enabled:
-            deliver_loan_sms_reminders(db)
+            mode = os.getenv('AQUAFARM_LOAN_REMINDER_MODE', 'installment').strip().lower()
+            deliver_loan_sms_reminders(db, monthly=mode == 'monthly')
 
 
 _scheduler: BackgroundScheduler | None = None
@@ -418,6 +434,8 @@ def start_daily_reminder_scheduler():
     missing = [key for key in required if not os.getenv(key, '').strip()]
     if missing:
         raise RuntimeError(f'Daily SMS reminders are enabled but missing configuration: {", ".join(missing)}')
+    if loans_enabled and os.getenv('AQUAFARM_LOAN_REMINDER_MODE', 'installment').strip().lower() not in ('installment', 'monthly'):
+        raise RuntimeError('AQUAFARM_LOAN_REMINDER_MODE must be installment or monthly')
     cutoff = reminder_time()
     _scheduler = BackgroundScheduler(timezone=GHANA_TZ)
     _scheduler.add_job(

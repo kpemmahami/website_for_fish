@@ -1,12 +1,12 @@
 """Phase 0009 workflow, access restrictions, duplicate references, and balances."""
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from .test_api import client, upload_loan_video
 from .test_foundation import signup
 from .test_account_access import admin_headers, register_institution
 from app.loan_servicing import LoanInstallment
 from app.daily_reminders import LoanSmsReminder, deliver_loan_sms_reminders
-from app.main import SessionLocal
+from app.main import Farm, SessionLocal, User
 
 def test_loan_servicing_permissions_and_balances():
     farmer=signup('servicing-farmer@example.com')
@@ -127,11 +127,32 @@ def test_loan_servicing_permissions_and_balances():
     assert client.get(f'/farms/{fid}/loans',headers=stranger).status_code==404
     assert client.get(f'/finance/loans/{loan_id}/transactions',headers=farmer).status_code==200
     assert client.get(f'/farms/{fid}/loan-reminders',headers=farmer).status_code==200
-    final_video=upload_loan_video(officer,fid,'repayment',loan_id)
-    final=client.post(f'/finance/loans/{loan_id}/repayments',json={'amount_ghs':'9800.00','reference':'REPAY-FINAL','transaction_date':today,'evidence_id':final_video},headers=officer)
-    assert final.status_code==201,final.text
-    assert final.json()['status']=='repaid'
-    assert final.json()['total_scheduled_balance_ghs']==0
+    video_path = f'/finance/loans/{loan_id}/evidence'
+    stamp = datetime.now(timezone.utc).isoformat()
+    params = {'record_type': 'repayment', 'captured_at': stamp, 'device_recorded_at': stamp,
+              'duration_seconds': 15, 'retry_upload': True}
+    video = bytes.fromhex('1a45dfa3') + b'collection-evidence'
+    video_headers = {**officer, 'Content-Type': 'video/webm'}
+    upload = client.post(video_path, params=params, content=video, headers=video_headers)
+    assert upload.status_code == 201, upload.text
+    retry = client.post(video_path, params=params, content=video, headers=video_headers)
+    assert retry.status_code == 201, retry.text
+    final_video = upload.json()['id']
+    assert retry.json()['id'] == final_video
+    assert client.post(video_path, params=params, content=video,
+                       headers={**lender, 'Content-Type': 'video/webm'}).status_code == 409
+    path = f'/finance/loans/{loan_id}/field-repayments'
+    payload = {'amount_ghs': '9800.00', 'transaction_date': today, 'evidence_id': final_video,
+               'collection_id': '9e97bd6f-86d1-4a35-90cb-e47f96ac5243', 'customer_consented': True}
+    assert client.post(path, json={**payload, 'customer_consented': False}, headers=officer).status_code == 422
+    assert client.post(path, json=payload, headers=reviewer).status_code == 404
+    final = client.post(path, json=payload, headers=officer)
+    assert final.status_code == 200, final.text
+    assert final.json()['amount_ghs'] == 9800
+    assert client.post(path, json=payload, headers=officer).json() == final.json()
+    assert client.post(path, json=payload, headers=lender).status_code == 409
+    assert client.post(path, json={**payload, 'amount_ghs': '9700.00'}, headers=officer).status_code == 409
+    assert client.get(f'/finance/loans/{loan_id}', headers=officer).json()['status'] == 'repaid'
     final_totals = client.get(disbursements, headers=lender).json()['totals']
     assert final_totals == {
         'disbursed_ghs': 10000, 'recovered_ghs': 11300,
@@ -212,6 +233,17 @@ def test_custom_schedule_reminders_and_portfolio_metrics():
     assert len(sent)==1
     assert sent[0][0]=='+233545550172'
     assert 'is due' in sent[0][1]
+    monthly_at = datetime.combine(first_due.replace(day=1), time(8), ZoneInfo('Africa/Accra'))
+    with SessionLocal() as db:
+        borrower = db.get(User, db.get(Farm, farm_id).owner_id)
+        assert deliver_loan_sms_reminders(db, monthly_at, sender, monthly=True) == 0
+        borrower.phone_verified_at = monthly_at
+        db.commit()
+        assert deliver_loan_sms_reminders(db, monthly_at, sender, monthly=True) == 1
+        assert deliver_loan_sms_reminders(db, monthly_at + timedelta(hours=2), sender, monthly=True) == 0
+        assert db.query(LoanSmsReminder).filter_by(reminder_type='monthly').count() == 1
+    assert len(sent) == 2
+    assert 'monthly loan reminder' in sent[1][1]
     with SessionLocal() as db:
         installment=db.query(LoanInstallment).filter_by(loan_id=loan_id,number=1).one()
         installment.due_on=date.today()-timedelta(days=1)

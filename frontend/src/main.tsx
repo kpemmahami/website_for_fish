@@ -476,14 +476,15 @@ function App(){
    });
    return response.json();
  }
- async function uploadLoanEvidence(activity:'loan_application'|'disbursement'|'repayment',recording:RecordedVideo,loanId?:number){
-   if(!farmId)throw new Error('Select a farm before submitting a loan application.');
+ async function uploadLoanEvidence(activity:'loan_application'|'disbursement'|'repayment',recording:RecordedVideo,loanId?:number,retryUpload=false){
+   if(loanId===undefined&&!farmId)throw new Error('Select a farm before submitting a loan application.');
    const query=new URLSearchParams({
      record_type:activity,
      captured_at:recording.capturedAt,
      device_recorded_at:recording.deviceRecordedAt,
      duration_seconds:'15',
    });
+   if(retryUpload)query.set('retry_upload','true');
    const path=loanId===undefined
      ?`/farms/${farmId}/loan-evidence?${query.toString()}`
      :`/finance/loans/${loanId}/evidence?${query.toString()}`;
@@ -1126,8 +1127,13 @@ function App(){
    setBusy(true);setError('');setNotice('');
    try{
      let evidenceId=transactionEvidenceId;
-     if(evidenceId===null){const uploaded=await uploadLoanEvidence(kind==='disbursements'?'disbursement':'repayment',transactionVideo,id);evidenceId=uploaded.id;setTransactionEvidenceId(evidenceId)}
-     await json(`/finance/loans/${id}/${kind}`,{amount_ghs:form.loan_amount_ghs,reference:form.loan_reference,transaction_date:form.loan_transaction_date,evidence_id:evidenceId});
+     if(evidenceId===null){const uploaded=await uploadLoanEvidence(kind==='disbursements'?'disbursement':'repayment',transactionVideo,id,page==='collections');evidenceId=uploaded.id;setTransactionEvidenceId(evidenceId)}
+     const payment={amount_ghs:form.loan_amount_ghs,transaction_date:form.loan_transaction_date,evidence_id:evidenceId};
+     if(page==='collections'){
+       await json(`/finance/loans/${id}/field-repayments`,{...payment,collection_id:form.collection_id,customer_consented:true});
+     }else{
+       await json(`/finance/loans/${id}/${kind}`,{...payment,reference:form.loan_reference});
+     }
      setNotice(kind==='disbursements'?'Disbursement recorded with video evidence.':'Repayment recorded with video evidence.');
      setForm({});setTransactionVideo(null);setTransactionEvidenceId(null);setTransactionRecorderKey(key=>key+1);
      await Promise.all([loadFarm(),loadLender()]);
@@ -2170,7 +2176,7 @@ function App(){
     <p className="muted">Principal repaid divided by principal disbursed across this institution's loan accounts.</p>
    </section>}
    <LoanCollections key={institutionId} institutionId={institutionId} load={json} refresh={portfolio}
-    collect={id=>{setForm({loan_reference:'FIELD-'+crypto.randomUUID(),loan_transaction_date:new Date().toISOString().slice(0,10)});void openLoan(id)}} video={(id,mediaType)=>void download('/finance/loan-evidence/'+id+'/video',
+    collect={id=>{setForm({collection_id:crypto.randomUUID(),loan_transaction_date:new Date().toISOString().slice(0,10)});void openLoan(id)}} video={(id,mediaType)=>void download('/finance/loan-evidence/'+id+'/video',
      'loan_repayment_'+id+(mediaType==='video/mp4'?'.mp4':'.webm'))}/>
  </>}
  {page==='disbursements'&&selectedInstitution?.status==='verified'&&institutionId!=null&&<>
@@ -2303,7 +2309,7 @@ function App(){
   {(page==='lender'||page==='collections')&&canRepay&&selectedLoan.status==='active'&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'repayments')}>
    <h3>Record loan repayment</h3>
    <label className="field"><span>Amount received (GH₵)</span><input required type="number" min="0.01" max={selectedLoan.total_scheduled_balance_ghs} step="0.01" value={form.loan_amount_ghs??''} onChange={e=>setForm({...form,loan_amount_ghs:e.target.value})}/></label>
-   <label className="field"><span>Payment reference</span><input required minLength={3} maxLength={100} value={form.loan_reference??''} onChange={e=>setForm({...form,loan_reference:e.target.value})}/></label>
+   {page!=='collections'&&<label className="field"><span>Payment reference</span><input required minLength={3} maxLength={100} value={form.loan_reference??''} onChange={e=>setForm({...form,loan_reference:e.target.value})}/></label>}
    <label className="field"><span>Payment date</span><input required type="date" max={localDate()} value={form.loan_transaction_date??''} onChange={e=>setForm({...form,loan_transaction_date:e.target.value})}/></label>
    {page==='collections'&&<label className="field">
     <span><input type="checkbox" required checked={Boolean(form.collection_consent)}
