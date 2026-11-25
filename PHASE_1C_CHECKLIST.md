@@ -17,7 +17,7 @@ The current production database is Neon PostgreSQL. Use isolated SQLite and Post
 
 | Item | Status |
 | --- | --- |
-| Mobile web drawer and compact header | Locally verified in a headless Edge component fixture. Physical-device and authenticated workspace acceptance testing pending |
+| Mobile web drawer and compact header | Locally verified in headless Edge with a component fixture and signed-in farmer and institution workspaces. Physical-device acceptance testing pending |
 | Existing desktop navigation and permission filtering | Existing navigation reused. Production build verified |
 | Activity history and page simplification | Partially implemented |
 | Finance transaction history and analytics | Partially implemented |
@@ -34,4 +34,4 @@ The current production database is Neon PostgreSQL. Use isolated SQLite and Post
 3. Reopen and dismiss using the close button and backdrop. Choose a page and confirm the drawer closes, the title updates, and the page begins at the top.
 4. Test the notification and account controls. Verify that institutional users only see their allowed navigation and that browser back and viewport resizing dismiss an open drawer.
 
-The headless fixture passed mobile and desktop visibility, scroll locking, Escape, focus restoration, navigation, backdrop dismissal, and resize dismissal. The first full-workspace check timed out with a mock session. The authenticated integration checks remain open.
+The headless fixture passed mobile and desktop visibility, scroll locking, Escape, focus restoration, navigation, backdrop dismissal, and resize dismissal. The signed-in test passed against an isolated backend with fictional farmer and institution accounts after correcting the test origin's CORS settings. It verified mobile navigation, desktop sidebar visibility and institution permission filtering. Physical browser and device checks remain open.
