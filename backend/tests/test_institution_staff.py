@@ -1,5 +1,5 @@
 from .test_api import client
-from .test_account_access import admin_headers, login, register_institution
+from .test_account_access import admin_headers, complete_initial_password, login, register_institution
 from .test_foundation import signup
 from app.lending import LoanApplication
 from app.main import SessionLocal
@@ -27,9 +27,7 @@ def test_institution_staff_lifecycle():
     staff_id = created.json()['user_id']
     assert client.post(root, json=payload, headers=owner).status_code == 409
     assert payload['password'] not in client.get(root, headers=owner).text
-    logged_in = client.post('/auth/institution/login', json={'email': staff_email, 'password': payload['password']})
-    assert logged_in.status_code == 200
-    staff = {'Authorization': 'Bearer '+logged_in.json()['access_token']}
+    staff = complete_initial_password(staff_email, payload['password'])
     assert client.get('/finance/institutions/mine', headers=staff).json()[0]['role'] == 'loan_officer'
     assert client.get(f'/finance/institutions/{institution_id}/applications', headers=staff).status_code == 200
     farm = client.post('/farms',json={

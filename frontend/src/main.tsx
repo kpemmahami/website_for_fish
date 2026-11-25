@@ -344,6 +344,7 @@ function App(){
    ()=>new URLSearchParams(window.location.hash.slice(1)).get('administrator-contact')??'');
  const [adminEnrollment,setAdminEnrollment]=useState<{enrollment_token:string;setup_key:string;account_email:string}|null>(null);
  const [needsAuthenticator,setNeedsAuthenticator]=useState(false);
+ const [initialPasswordToken,setInitialPasswordToken]=useState('');
  useEffect(()=>{
    if(administratorContactToken)window.history.replaceState(null,'',window.location.pathname+window.location.search);
  },[administratorContactToken]);
@@ -993,6 +994,12 @@ function App(){
        const result=await json(`/auth/${portal}/login`,{
          ...credentials,...(portal==='admin'&&needsAuthenticator?{authenticator_code:form.authenticator_code}:{}),
        });
+       if(portal==='institution'&&result.initial_password_token){
+         setInitialPasswordToken(result.initial_password_token);
+         setShowLoginPassword(false);
+         setForm({email:identifier});
+         return;
+       }
        sessionStorage.setItem('aquafarm_token',result.access_token);
        setPage(portal==='admin'?'admin':portal==='institution'?'lender':'overview');
        setForm({});setToken(result.access_token);
@@ -1275,6 +1282,28 @@ function App(){
   {kind:'financial',label:'Financial analysis',description:'Recorded costs, cost per kg and recommended prices',csv:'analytics/financial.csv'},
   {kind:'bank-ready',label:'Investment-ready report',description:'Production, sales, costs, receivables and evidence caveats',csv:'bank-ready.csv'},
  ];
+ if(initialPasswordToken)return <div className="authwrap"><div className="authcard">
+   <h1>Set your institution password</h1>
+   <p>Choose a private password before accessing your institution workspace.</p>
+   {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
+   <form onSubmit={async event=>{
+     event.preventDefault();setError('');
+     if(form.password!==form.confirm_password){setError('The passwords do not match.');return}
+     setBusy(true);
+     try{
+       const result=await json('/auth/institution/initial-password',{token:initialPasswordToken,password:form.password});
+       setInitialPasswordToken('');setForm({email:form.email});setNotice(result.message);
+     }catch(problem){setError(String(problem))}
+     finally{setBusy(false)}
+   }}>
+     {field('password','New password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
+     {field('confirm_password','Confirm new password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
+     <button className="primary" disabled={busy}>Set password</button>
+   </form>
+   <button className="textbutton" type="button" disabled={busy} onClick={()=>{
+     setInitialPasswordToken('');setForm({email:form.email});setError('');
+   }}>Back to sign in</button>
+ </div></div>;
  if(adminEnrollment)return <div className="authwrap"><div className="authcard">
    <h1>Set up your authenticator</h1>
    <p>Add a time-based account in your authenticator app for {adminEnrollment.account_email}. Enter this setup key in the app.</p>
@@ -2012,7 +2041,7 @@ function App(){
    {field('institution_admin_name','Initial administrator full name','text',{required:true,maxLength:120})}
    {field('institution_admin_email','Initial administrator official email','email',{required:true})}
    {field('institution_admin_phone','Initial administrator mobile phone','tel',{required:true,maxLength:64})}
-   {field('institution_admin_password','Initial administrator password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
+   {field('institution_admin_password','Temporary administrator password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
    <button className="primary" disabled={busy}>Register institution</button>
  </form>
  </details>

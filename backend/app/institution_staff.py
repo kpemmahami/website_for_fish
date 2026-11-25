@@ -85,6 +85,7 @@ def list_staff(institution_id: int, user: CurrentUser, db: Db):
 def create_staff(institution_id: int, data: CreateStaffIn, user: CurrentUser, db: Db):
     member(db, institution_id, user.id, 'manage_staff')
     staff_user = new_user(data, 'institution')
+    staff_user.initial_password_required = True
     assign_phone_number(db, staff_user, data.phone_number)
     db.add(staff_user)
     try:

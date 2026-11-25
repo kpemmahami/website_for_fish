@@ -67,7 +67,29 @@ def register_institution(email, institution):
         **credentials(email), 'phone_number': next_test_phone(), 'institution': institution,
     })
     assert response.status_code == 201, response.text
-    return login('institution', email), response
+    return complete_initial_password(email, PASSWORD), response
+
+
+def complete_initial_password(email, initial_password):
+    path = '/auth/institution/login'
+    credentials_in = {'email': email, 'password': initial_password}
+    first = client.post(path, json=credentials_in)
+    assert first.status_code == 200, first.text
+    challenge = first.json()
+    assert 'access_token' not in challenge
+    token = challenge['initial_password_token']
+    assert client.get('/finance/institutions/mine', headers={'Authorization': f'Bearer {token}'}).status_code == 401
+    setup_path = '/auth/institution/initial-password'
+    if len(initial_password) >= 12:
+        assert client.post(setup_path, json={'token': token, 'password': initial_password}).status_code == 422
+    password = 'a-private-institution-password-741'
+    changed = {'token': token, 'password': password}
+    assert client.post(setup_path, json=changed).status_code == 200
+    assert client.post(setup_path, json=changed).status_code == 400
+    assert client.post(path, json=credentials_in).status_code == 401
+    login_response = client.post(path, json={**credentials_in, 'password': password})
+    assert login_response.status_code == 200, login_response.text
+    return {'Authorization': f"Bearer {login_response.json()['access_token']}"}
 
 
 def test_account_boundaries_and_institution_rejection(monkeypatch):

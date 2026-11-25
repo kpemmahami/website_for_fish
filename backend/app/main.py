@@ -19,7 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
 from pwdlib import PasswordHash
-from sqlalchemy import DateTime, ForeignKey, Index, String, Float, Text, Boolean, create_engine, false, select
+from sqlalchemy import DateTime, ForeignKey, Index, String, Float, Text, Boolean, create_engine, false, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -52,6 +52,7 @@ class User(Base):
     password_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_suspended: Mapped[bool] = mapped_column(Boolean, server_default=false())
     session_generation: Mapped[str | None] = mapped_column(String(32))
+    initial_password_required: Mapped[bool] = mapped_column(Boolean, server_default=false())
     sms_daily_records_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sms_loan_reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -132,6 +133,19 @@ class Login(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = 'bearer'
+
+
+class InitialPasswordChallenge(BaseModel):
+    initial_password_token: str
+
+
+class InitialPasswordChange(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    token: str = Field(min_length=1, max_length=2048)
+    password: str = Field(min_length=12, max_length=128)
+
+
+INITIAL_PASSWORD_PURPOSE = 'institution_initial_password'
 
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -246,7 +260,7 @@ def authenticated_user(credentials: Annotated[HTTPAuthorizationCredentials, Depe
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail='User no longer exists')
-    if user.is_suspended:
+    if user.is_suspended or user.initial_password_required:
         raise HTTPException(status_code=401, detail='Invalid or expired token')
     binding = payload.get('binding')
     if (
@@ -325,7 +339,9 @@ registration_log = logging.getLogger('aquafarm.registration')
 
 @app.exception_handler(RequestValidationError)
 async def safe_registration_validation(request: Request, error: RequestValidationError):
-    if request.method == 'POST' and request.url.path in FARMER_REGISTRATION_PATHS:
+    if request.method == 'POST' and request.url.path in (
+        FARMER_REGISTRATION_PATHS | {'/auth/institution/initial-password'}
+    ):
         return JSONResponse({'detail': [{'loc': item['loc'], 'type': item['type']}
                                          for item in error.errors()]}, status_code=422)
     return await request_validation_exception_handler(request, error)
@@ -383,7 +399,7 @@ def register(data: FarmerRegister, db: Db):
     return response
 
 
-def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token:
+def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token | InitialPasswordChallenge:
     from .development import DEVELOPMENT_ACCOUNTS, enabled, seeded_account
 
     identifier = data.email.lower()
@@ -404,6 +420,13 @@ def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> T
             raise HTTPException(status_code=401, detail='Invalid credentials')
     if user is None or user.is_suspended or user.account_type not in account_types or not password_hash.verify(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid credentials')
+    if user.account_type == 'institution' and user.initial_password_required:
+        token = jwt.encode({
+            'sub': str(user.id), 'purpose': INITIAL_PASSWORD_PURPOSE,
+            'binding': password_binding(user, INITIAL_PASSWORD_PURPOSE),
+            'exp': datetime.now(timezone.utc) + timedelta(minutes=10),
+        }, SECRET_KEY, algorithm='HS256')
+        return InitialPasswordChallenge(initial_password_token=token)
     token = jwt.encode({
         'sub': str(user.id), 'purpose': 'access', 'binding': password_binding(user, 'access'),
         'exp': datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES),
@@ -421,9 +444,49 @@ def login(data: Login, db: Db):
     return login_account(data, db, ('farmer', 'legacy', 'pending_farmer'))
 
 
-@app.post('/auth/institution/login', response_model=Token)
+@app.post('/auth/institution/login', response_model=Token | InitialPasswordChallenge)
 def institution_login(data: Login, db: Db):
     return login_account(data, db, ('institution', 'legacy'))
+
+
+@app.post('/auth/institution/initial-password')
+def replace_initial_password(data: InitialPasswordChange, db: Db):
+    invalid = HTTPException(400, 'This password setup session is invalid or expired')
+    try:
+        payload = jwt.decode(data.token, SECRET_KEY, algorithms=['HS256'],
+                             options={'require': ['exp', 'sub', 'purpose', 'binding']})
+        account_id = int(payload['sub'])
+        if payload['purpose'] != INITIAL_PASSWORD_PURPOSE or not isinstance(payload['binding'], str):
+            raise invalid
+    except (InvalidTokenError, TypeError, ValueError):
+        raise invalid from None
+    user = db.get(User, account_id)
+    if (
+        user is None or user.is_suspended or user.account_type != 'institution'
+        or not user.initial_password_required
+        or not hmac.compare_digest(payload['binding'], password_binding(user, INITIAL_PASSWORD_PURPOSE))
+    ):
+        raise invalid
+    if password_hash.verify(data.password, user.password_hash):
+        raise HTTPException(422, 'Choose a password different from the initial password')
+    changed = db.execute(update(User).where(
+        User.id == user.id,
+        User.account_type == 'institution',
+        User.initial_password_required.is_(True),
+        User.is_suspended.is_(False),
+        User.password_hash == user.password_hash,
+        User.session_generation == user.session_generation,
+    ).values(
+        password_hash=password_hash.hash(data.password),
+        initial_password_required=False,
+        password_reset_at=datetime.now(timezone.utc),
+        recovery_requested_at=None,
+    ).execution_options(synchronize_session=False))
+    if changed.rowcount != 1:
+        raise invalid
+    audit(db, user, 'replace_initial_password', 'user', user.id)
+    db.commit()
+    return {'message': 'Password updated. Sign in with your new password.'}
 
 
 @app.post('/auth/admin/login', response_model=Token)

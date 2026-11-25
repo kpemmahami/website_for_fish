@@ -123,6 +123,8 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Authentication SMS integration | Not implemented |
 | Farm staff creation, permissions, farm and unit assignments | Partially implemented |
 | Direct institution staff creation and role enforcement | Newly implemented and locally verified |
+| Mandatory initial-password replacement for new institution administrators and staff | Newly implemented and locally verified |
+| Separate contact verification or MFA for institution accounts | Not implemented |
 | Audit history and session revocation | Partially implemented |
 | Phase 1B mobile responsiveness | Partially implemented |
 | Hosted verification of the Super Admin hotfix | Verified on the hosted website |
@@ -145,6 +147,8 @@ ORDER BY account_count DESC, phone_number;
 ```
 
 New farmer and processor accounts can sign in and check their status. Operational API requests are denied while approval is pending. A platform administrator can approve the account from **Super Admin → Farmer and processor approvals**. The decision is audited, and the user can refresh the status screen to open the dashboard. This uses the existing account type and audit tables and requires no new migration.
+
+Revision `0035_initial_password` adds an initial-password requirement that defaults to off for existing accounts. For new institution administrators and staff, sign in through **Bank or financial institution** with the temporary password. Set a different private password of at least 12 characters, then sign in again. The temporary password grants only a ten-minute, single-use setup challenge. The challenge cannot access any workspace API. Test with a fictional institution before deployment.
 
 1. Add staged identity migrations for normalized phone numbers, verification state, password-change requirements and revocable sessions. Review conflicts before enforcing uniqueness.
 2. Extend owner bootstrap and add owner-only administrator management. Extend institution provisioning with contact details and secure first-login activation.

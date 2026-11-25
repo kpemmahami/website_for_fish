@@ -120,6 +120,8 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
   return 'Registration is temporarily unavailable. Please try again.';
  }
  const login=/^\/auth\/(?:[^/]+\/)?login$/.test(path);
+ if(path==='/auth/institution/initial-password'&&status===400)return 'This password setup session expired or was already used. Return to sign in.';
+ if(path==='/auth/institution/initial-password'&&status===422&&detail==='Choose a password different from the initial password')return detail+'.';
  if(path==='/auth/admin/login'&&status===401&&detail==='Invalid or already used authenticator code')return 'Enter a fresh code from your authenticator app.';
  if(['/auth/admin/contact-verification','/auth/admin/activate'].includes(path)&&status===400)
    return 'The code or setup link is invalid or expired. If it expired, ask the Platform Owner to restart setup.';

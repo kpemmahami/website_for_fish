@@ -494,6 +494,7 @@ def add_institution(data, user, db):
 def register_institution(data: InstitutionRegistration, administrator: CurrentUser, db: Db):
     require_platform_admin(administrator)
     user = new_user(data, 'institution')
+    user.initial_password_required = True
     assign_phone_number(db, user, data.phone_number)
     db.add(user)
     try:

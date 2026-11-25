@@ -31,7 +31,7 @@ export function InstitutionStaff({id, name, api}:{id:number,name:string,api:Api}
     setBusy(true);setError('');setStatus('');
     try{
       await api(root+path,body,method);
-      setStatus(method==='POST'?'Staff account created. The employee can now sign in.':'Staff access updated.');
+      setStatus(method==='POST'?'Staff account created. The employee must replace the temporary password at first sign-in.':'Staff access updated.');
       try{setData(await load())}catch(problem){setError(String(problem))}
       return true;
     }catch(problem){setError(String(problem));return false}
@@ -66,7 +66,7 @@ export function InstitutionStaff({id, name, api}:{id:number,name:string,api:Api}
         {([['full_name','Full Name','text'],['email','Email Address','email'],['phone_number','Mobile phone number','tel'],['department','Department','text'],['job_title','Job title','text']] as const).map(([key,label,type])=>
           <label className="field" key={key}><span>{label}</span><input type={type} required={key==='full_name'||key==='email'||key==='phone_number'} maxLength={key==='email'?255:120} value={form[key]} onChange={event=>setForm({...form,[key]:event.target.value})}/></label>)}
         <label className="field"><span>Staff role</span><select value={form.role} onChange={event=>setForm({...form,role:event.target.value})}>{roleOptions.map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>
-        <label className="field"><span>Initial password</span><input type="password" required minLength={8} maxLength={128} autoComplete="new-password" value={form.password} onChange={event=>setForm({...form,password:event.target.value})}/></label>
+        <label className="field"><span>Temporary password</span><input type="password" required minLength={8} maxLength={128} autoComplete="new-password" value={form.password} onChange={event=>setForm({...form,password:event.target.value})}/></label>
         <button className="primary" disabled={busy}>Create staff account</button>
       </form>}
       <label className="field"><span>Search staff</span><input type="search" value={search} onChange={event=>setSearch(event.target.value)}/></label>
