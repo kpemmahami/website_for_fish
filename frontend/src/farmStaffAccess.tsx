@@ -17,6 +17,11 @@ interface AssignedUnit {
   unit_type: string;
 }
 
+interface ActivityPage {
+  items: {id: number; action: string; created_at: string; unit_id: number; user_id: number; actor_name: string}[];
+  has_more: boolean;
+}
+
 export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
   farmId: number | null;
   units: {id: number; name: string}[];
@@ -30,6 +35,8 @@ export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [activity, setActivity] = useState<ActivityPage|null>(null);
+  const [activityOffset, setActivityOffset] = useState(0);
   const refresh = useCallback(async () => {
     const [mine, access] = await Promise.all([
       load('/staff/assigned-units'),
@@ -43,9 +50,23 @@ export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
     void refresh().catch(problem => setError(String(problem)));
   }, [refresh]);
 
+  async function loadActivity(offset: number) {
+    try {
+      const page: ActivityPage = await load(`/farms/${farmId}/staff-unit-access/activity?offset=${offset}`);
+      setActivity(page);
+      setActivityOffset(offset);
+    } catch (problem) {
+      setError(String(problem));
+    }
+  }
+
   async function save(action: () => Promise<unknown>) {
     setBusy(true);setError('');
-    try {await action();await refresh()}
+    try {
+      await action();
+      await refresh();
+      if(activity)await loadActivity(0);
+    }
     catch (problem) {setError(String(problem))}
     finally {setBusy(false)}
   }
@@ -85,6 +106,26 @@ export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
           }
         }}>Revoke access</button>
       </div>)}
+      <details onToggle={event=>{
+        if(event.currentTarget.open)void loadActivity(0);
+      }}>
+        <summary>Unit access history</summary>
+        {activity?.items.length===0&&<p>No access changes recorded.</p>}
+        {activity?.items.map(event=>{
+          const assignment=granted.find(row=>row.unit_id===event.unit_id&&row.user_id===event.user_id);
+          return <div className="item" key={event.id}>
+            <b>{event.action==='grant_unit_view'?'Granted access':'Revoked access'}</b>
+            <small>{assignment?.full_name??`Account ${event.user_id}`} · {assignment?.unit_name??`Unit ${event.unit_id}`}</small>
+            <small>{event.actor_name} · {new Date(event.created_at).toLocaleString()}</small>
+          </div>;
+        })}
+        <div className="farmactions">
+          <button type="button" className="outline" disabled={activityOffset===0}
+            onClick={()=>void loadActivity(activityOffset-25)}>Previous</button>
+          <button type="button" className="outline" disabled={!activity?.has_more}
+            onClick={()=>void loadActivity(activityOffset+25)}>Next</button>
+        </div>
+      </details>
     </>}
   </section>;
 }

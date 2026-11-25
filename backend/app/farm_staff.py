@@ -1,13 +1,13 @@
 """Owner-managed read access to assigned active production units."""
 import json
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Query
 from pydantic import BaseModel, ConfigDict, EmailStr
 from sqlalchemy import Boolean, ForeignKey, Index, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .main import Base, CurrentUser, Db, Farm, ProductionUnit, User, app, audit, owned_farm
+from .main import AuditLog, Base, CurrentUser, Db, Farm, ProductionUnit, User, app, audit, owned_farm
 
 
 class FarmStaffUnitAccess(Base):
@@ -21,6 +21,21 @@ class FarmStaffUnitAccess(Base):
 class UnitAccessGrant(BaseModel):
     model_config = ConfigDict(extra='forbid')
     email: EmailStr
+
+
+@app.get('/farms/{farm_id}/staff-unit-access/activity')
+def staff_unit_activity(farm_id: int, user: CurrentUser, db: Db, offset: int = Query(0, ge=0)):
+    owned_farm(farm_id, user, db)
+    rows = db.execute(select(AuditLog, User.full_name).join(User, User.id == AuditLog.actor_id).where(
+        AuditLog.entity_type == 'farm_staff', AuditLog.entity_id == farm_id,
+        AuditLog.action.in_(('grant_unit_view', 'revoke_unit_view')),
+    ).order_by(AuditLog.id.desc()).offset(offset).limit(26)).all()
+    items = []
+    for event, actor_name in rows[:25]:
+        details = json.loads(event.details)
+        items.append({'id': event.id, 'action': event.action, 'created_at': event.created_at,
+                      'unit_id': details['unit_id'], 'user_id': details['user_id'], 'actor_name': actor_name})
+    return {'items': items, 'has_more': len(rows) > 25}
 
 
 @app.get('/farms/{farm_id}/staff-unit-access')

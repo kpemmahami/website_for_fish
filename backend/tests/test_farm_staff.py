@@ -30,3 +30,8 @@ def test_unit_assignments_are_scoped_and_revocable():
     assert client.get('/staff/assigned-units', headers=staff).json() == []
     history = client.get(f'/farms/{farm_id}/staff-unit-access', headers=owner).json()
     assert len(history) == 1 and history[0]['is_active'] is False
+    activity_path = f'/farms/{farm_id}/staff-unit-access/activity'
+    assert client.get(activity_path, headers=staff).status_code == 404
+    activity = client.get(activity_path, headers=owner).json()
+    assert [event['action'] for event in activity['items']] == ['revoke_unit_view', 'grant_unit_view']
+    assert all(event['unit_id'] == units[0] for event in activity['items'])
