@@ -1,4 +1,5 @@
 """Apply only the password recovery migration to a confirmed Neon database."""
+import argparse
 import os
 import secrets
 import subprocess
@@ -18,21 +19,50 @@ def current_revision(engine):
         return connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one()
 
 
-def main():
-    raw_url = getpass('Paste the intended Neon PostgreSQL URL (input hidden): ').strip()
+def neon_target(raw_url):
+    raw_url = raw_url.strip()
+    if raw_url[:1] in ("'", '"') and raw_url[-1:] == raw_url[:1]:
+        raw_url = raw_url[1:-1].strip()
     try:
         target = make_url(raw_url)
-        if (
-            target.drivername not in ('postgresql', 'postgresql+psycopg')
-            or not (target.host or '').endswith('.neon.tech')
-            or not target.database or not target.password
-            or target.query.get('sslmode') not in ('require', 'verify-ca', 'verify-full')
-        ):
-            raise ValueError
     except (ArgumentError, ValueError):
-        raise SystemExit('Stopped. Use a Neon PostgreSQL URL with SSL enabled.') from None
+        raise SystemExit('Stopped. Paste only the connection URL, beginning with postgresql://.') from None
+    if target.drivername not in ('postgresql', 'postgresql+psycopg'):
+        raise SystemExit('Stopped. The connection URL must use PostgreSQL.')
+    if not (target.host or '').lower().endswith('.neon.tech'):
+        raise SystemExit('Stopped. The connection URL must point to a Neon hostname.')
+    if not target.username or not target.database or not target.password:
+        raise SystemExit('Stopped. The connection URL must include a username, password and database name.')
+    if target.query.keys() - {'sslmode', 'channel_binding'}:
+        raise SystemExit('Stopped. Use the Neon URL with only sslmode and channel_binding options.')
+    mode = target.query.get('sslmode')
+    if mode is None:
+        target = target.update_query_dict({'sslmode': 'require'})
+    elif mode not in ('require', 'verify-ca', 'verify-full'):
+        raise SystemExit('Stopped. Set sslmode to require, verify-ca or verify-full.')
+    return target.set(drivername='postgresql+psycopg')
 
-    engine = create_engine(target.set(drivername='postgresql+psycopg'), connect_args={'connect_timeout': 10})
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--clipboard', action='store_true', help='Read the connection URL from the Windows clipboard')
+    args = parser.parse_args()
+    if args.clipboard:
+        getpass('Copy DATABASE_URL in Render, then press Enter here without pasting (input hidden): ')
+        try:
+            raw_url = subprocess.run(
+                ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                 '[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-Clipboard -Raw'],
+                capture_output=True, encoding='utf-8', check=True, timeout=10,
+            ).stdout
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            raise SystemExit('Stopped. Could not read the Windows clipboard.') from None
+        if not raw_url.strip().lstrip("'\"").startswith(('postgresql://', 'postgresql+psycopg://')):
+            raise SystemExit('Stopped. The clipboard does not begin with a PostgreSQL URL. Copy the value beside DATABASE_URL in Render Environment.') from None
+    else:
+        raw_url = getpass('Paste the intended Neon PostgreSQL URL (input hidden): ')
+    target = neon_target(raw_url)
+    engine = create_engine(target, connect_args={'connect_timeout': 10})
     try:
         revision = current_revision(engine)
         print(f'Target: {target.host} / {target.database}')
@@ -42,7 +72,7 @@ def main():
         if revision == PREVIOUS:
             if input(f'Type {target.host} to confirm this database: ').strip() != target.host:
                 raise SystemExit('Stopped. Database confirmation did not match.')
-            env = {**os.environ, 'DATABASE_URL': raw_url}
+            env = {**os.environ, 'DATABASE_URL': target.render_as_string(hide_password=False)}
             if not env.get('SECRET_KEY'):
                 env['SECRET_KEY'] = secrets.token_hex(32)
             result = subprocess.run(
