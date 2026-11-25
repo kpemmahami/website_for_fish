@@ -343,7 +343,10 @@ registration_log = logging.getLogger('aquafarm.registration')
 @app.exception_handler(RequestValidationError)
 async def safe_registration_validation(request: Request, error: RequestValidationError):
     if request.method == 'POST' and request.url.path in (
-        FARMER_REGISTRATION_PATHS | {'/auth/institution/initial-password', '/auth/me/phone-verification/confirm'}
+        FARMER_REGISTRATION_PATHS | {
+            '/auth/institution/initial-password', '/auth/me/phone-verification/confirm',
+            '/auth/me/phone-replacement/request', '/auth/me/phone-replacement/confirm',
+        }
     ):
         return JSONResponse({'detail': [{'loc': item['loc'], 'type': item['type']}
                                          for item in error.errors()]}, status_code=422)
@@ -512,6 +515,12 @@ def me(user: AuthenticatedUser, db: Db):
 
 @app.patch('/auth/me', response_model=UserOut)
 def update_contact(data: ContactUpdate, user: CurrentUser, db: Db):
+    user = db.scalar(select(User).where(User.id == user.id).with_for_update()
+                     .execution_options(populate_existing=True))
+    if user is None or user.is_suspended:
+        raise HTTPException(401, 'Invalid or expired token')
+    if data.phone_number != user.phone_number and (user.phone_verified_at is not None or user.is_platform_admin):
+        raise HTTPException(409, 'Use verified phone replacement to change this number')
     assign_phone_number(db, user, data.phone_number)
     user.sms_daily_records_enabled = data.sms_daily_records_enabled
     user.sms_loan_reminders_enabled = data.sms_loan_reminders_enabled

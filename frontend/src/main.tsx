@@ -13,7 +13,7 @@ import {LoanAppraisalReport} from './loanAppraisalReport';
 import {InstitutionStaff} from './institutionStaff';
 import {AdministratorDirectory} from './administratorDirectory';
 import {FarmerApprovals} from './farmerApprovals';
-import {PhoneVerification} from './phoneVerification';
+import {PhoneReplacement, PhoneVerification} from './phoneVerification';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, RefreshCw, CheckCircle2, AlertTriangle, PlusCircle, Building2, Sprout, Pencil, Archive, X, LocateFixed, Camera, RotateCcw, ChevronDown, ArrowLeft, CalendarDays, ClipboardList, Droplets, TrendingUp, Package, LifeBuoy, ShoppingBasket, Users, Settings, Eye, EyeOff} from 'lucide-react';
@@ -1418,7 +1418,7 @@ function App(){
      {authMode==='register'?'Back to sign in':'Create a farmer account'}
    </button>}
  </div></div>;
- const phoneVerification=user&&<PhoneVerification key={`${user.id}:${user.phone_number}`}
+ const phoneVerification=user&&<React.Fragment key={`${user.id}:${user.phone_number}`}><PhoneVerification
    phone={user.phone_number??null} verified={Boolean(user.phone_verified_at)}
    request={async()=>{
      const result=await json('/auth/me/phone-verification/request',{});
@@ -1428,7 +1428,14 @@ function App(){
    confirm={async code=>{
      const result=await json('/auth/me/phone-verification/confirm',{code});
      setUser(current=>current?{...current,phone_verified_at:result.phone_verified_at}:null);
-   }}/>;
+   }}/>
+   {!user.is_platform_admin&&user.phone_verified_at&&<PhoneReplacement
+     request={(phone,password)=>json('/auth/me/phone-replacement/request',{phone_number:phone,password})}
+     confirm={async(previous_code,code)=>{
+       await json('/auth/me/phone-replacement/confirm',{previous_code,code});
+       logout();
+     }}/>}
+ </React.Fragment>;
  if(user?.account_type==='pending_farmer')return <div className="authwrap"><div className="authcard">
    <h1>Account pending approval</h1>
    <p>An AquaFarm administrator needs to approve your account before you can use the dashboard.</p>
@@ -1582,7 +1589,7 @@ function App(){
   {phoneVerification}
   <h2 className="spaced">Daily SMS reminder settings</h2><p className="muted">A feeding record is expected for each active cycle every day. Missing records are flagged red after {dailyRecordStatus?.reminder_time||'08:00'} Africa/Accra time.</p>
   <form className="farmform" onSubmit={saveSmsContact}>
-   <label className="field"><span>Mobile number (international format, e.g. +233…)</span><input type="tel" autoComplete="tel" pattern="\+[1-9]\d{7,14}" required={Boolean(profileForm.sms_daily_records_enabled||profileForm.sms_loan_reminders_enabled)} value={profileForm.phone_number??''} onChange={e=>setProfileForm({...profileForm,phone_number:e.target.value})}/></label>
+   <label className="field"><span>Mobile number (international format, e.g. +233…)</span><input type="tel" autoComplete="tel" readOnly={Boolean(user.phone_verified_at)} pattern="\+[1-9]\d{7,14}" required={Boolean(profileForm.sms_daily_records_enabled||profileForm.sms_loan_reminders_enabled)} value={profileForm.phone_number??''} onChange={e=>setProfileForm({...profileForm,phone_number:e.target.value})}/></label>
    <label className="consent"><input type="checkbox" checked={Boolean(profileForm.sms_daily_records_enabled)} onChange={e=>setProfileForm({...profileForm,sms_daily_records_enabled:e.target.checked})}/> I agree to receive one SMS reminder each morning if an active cycle has no feeding record for the day.</label>
    <label className="consent"><input type="checkbox" checked={Boolean(profileForm.sms_loan_reminders_enabled)} onChange={e=>setProfileForm({...profileForm,sms_loan_reminders_enabled:e.target.checked})}/> I agree to receive SMS reminders 7 days before an instalment is due and daily while it is overdue.</label>
    <button className="outline" disabled={busy}>Save reminder settings</button>

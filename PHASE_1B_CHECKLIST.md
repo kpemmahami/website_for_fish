@@ -118,7 +118,8 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Authenticator enrollment and login MFA for newly provisioned administrators | Newly implemented and locally verified |
 | Existing administrator MFA enrollment and authenticator recovery | Not implemented |
 | Verification of a saved mobile number by SMS | Newly implemented and locally verified |
-| Secure phone replacement and trusted devices | Not implemented |
+| Verified phone replacement for farmer and institution accounts | Newly implemented and locally verified |
+| Privileged and lost-phone recovery, trusted devices | Not implemented |
 | Password recovery by email | Newly implemented and locally verified |
 | Real recovery email delivery | Blocked by external configuration |
 | Authentication SMS integration with Hubtel | Implemented but requires manual testing |
@@ -136,7 +137,7 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 
 Keep the remaining web and backend work on the development branch. When the batch is ready, test the full Alembic upgrade from the production revision on an isolated PostgreSQL database, then apply the reviewed chain in one production upgrade and deploy once. Keep Flutter release work separate.
 
-The remaining account security work includes verified phone replacement, existing-administrator authenticator enrollment and recovery, institution contact verification, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
+The remaining account security work includes privileged and lost-phone recovery, existing-administrator authenticator enrollment and recovery, institution contact verification at onboarding, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
 
 New farmer and processor signup requires a phone number. The web form and Flutter source send it, so release a compatible Flutter build alongside the backend if users register through the mobile app. Existing accounts keep email sign-in. Ghanaian local, country-code, and international input are normalized by the same service as phone sign-in. This change validates formatting. Ownership verification and conflict handling have separate rollout steps.
 
@@ -157,7 +158,9 @@ New farmer and processor accounts can sign in and check their status. Operationa
 
 Revision `0035_initial_password` adds an initial-password requirement that defaults to off for existing accounts. For new institution administrators and staff, sign in through **Bank or financial institution** with the temporary password. Set a different private password of at least 12 characters, then sign in again. The temporary password grants only a ten-minute, single-use setup challenge. The challenge cannot access any workspace API. Test with a fictional institution before deployment.
 
-Revision `0036_phone_verification` adds a timestamp and a short-lived challenge table. Pending farmers can verify their saved number from the approval screen. Signed-in farmers use **Settings**. Administrators and institution users use their dashboard. Codes expire after five minutes, allow five attempts, and can be resent after two minutes. An account's verification is cleared whenever its saved number changes. This is an opt-in ownership check during rollout. It does not change existing sign-in or approval requirements.
+Revision `0036_phone_verification` adds a timestamp and a short-lived challenge table. Pending farmers can verify their saved number from the approval screen. Signed-in farmers use **Settings**. Administrators and institution users use their dashboard. Codes expire after five minutes, allow five attempts, and can be resent after two minutes. Accounts with an unverified number can still use existing email sign-in and the existing profile form. The rollout does not yet require verification for signup approval.
+
+Farmer and institution users who have verified their number can use **Change verified mobile number**. The user supplies their current password and confirms separate codes received on the current and new phones. Only then is the new verified number saved and old sessions revoked. A direct profile update cannot replace a verified number. Privileged phone changes and recovery when the old phone is unavailable remain separate work.
 
 1. Add staged identity migrations for normalized phone numbers, verification state, password-change requirements and revocable sessions. Review conflicts before enforcing uniqueness.
 2. Extend owner bootstrap and add owner-only administrator management. Extend institution provisioning with contact details and secure first-login activation.

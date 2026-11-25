@@ -19,6 +19,9 @@ def upgrade():
         sa.Column('sent_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('attempts', sa.Integer(), nullable=False),
         sa.Column('consumed_at', sa.DateTime(timezone=True)),
+        sa.Column('previous_phone', sa.String(16)),
+        sa.Column('previous_code_digest', sa.String(64)),
+        sa.Column('password_proof', sa.String(64)),
     )
 
 
