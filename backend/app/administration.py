@@ -1,8 +1,12 @@
 ﻿"""Platform administrator provisioning and ownership checks."""
+import json
 from datetime import datetime
+from typing import Annotated, Literal
+from uuid import uuid4
 
 from fastapi import HTTPException, Query
-from sqlalchemy import DateTime, ForeignKey, String, func, or_, select
+from pydantic import BaseModel, ConfigDict, StringConstraints
+from sqlalchemy import DateTime, ForeignKey, String, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -73,7 +77,7 @@ def list_administrators(
         ))
     total = db.scalar(select(func.count(User.id)).where(*filters))
     rows = db.execute(select(
-        User.id, User.full_name, User.email, User.phone_number, User.created_at,
+        User.id, User.full_name, User.email, User.phone_number, User.created_at, User.is_suspended,
     ).where(*filters).order_by(User.created_at.desc(), User.id.desc()).offset(offset).limit(limit))
     return {
         'total': total,
@@ -82,3 +86,35 @@ def list_administrators(
             for row in rows
         ],
     }
+
+
+class AdministratorAccessChange(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: Literal['suspend', 'reactivate', 'revoke_sessions']
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+
+
+@app.post('/admin/administrators/{administrator_id}/access', tags=['Platform administration'])
+def change_administrator_access(administrator_id: int, data: AdministratorAccessChange, user: CurrentUser, db: Db):
+    require_platform_owner(user, db)
+    if administrator_id == user.id:
+        raise HTTPException(403, 'Platform Owner access is protected')
+
+    filters = [User.id == administrator_id, User.account_type == 'admin']
+    if data.action == 'reactivate':
+        filters.append(User.is_suspended.is_(True))
+        values = {'is_suspended': False}
+    else:
+        values = {'session_generation': uuid4().hex, 'recovery_requested_at': None}
+        if data.action == 'suspend':
+            filters.append(User.is_suspended.is_(False))
+            values['is_suspended'] = True
+
+    result = db.execute(update(User).where(*filters).values(**values))
+    if result.rowcount != 1:
+        if not db.scalar(select(User.id).where(User.id == administrator_id, User.account_type == 'admin')):
+            raise HTTPException(404, 'Administrator not found')
+        raise HTTPException(409, 'Administrator status already changed. Refresh and try again.')
+    audit(db, user, data.action, 'platform_admin', administrator_id, json.dumps({'reason': data.reason}))
+    db.commit()
+    return {'message': 'Administrator access updated.'}

@@ -72,7 +72,9 @@ def request_recovery(data: RecoveryRequest, db: Db, background: BackgroundTasks)
     if settings is None:
         raise HTTPException(503, 'Password recovery email is unavailable. Contact support.')
     email = str(data.email).lower()
-    user = db.scalar(select(User).where(User.email == email, User.account_type.in_(PORTALS[data.portal])))
+    user = db.scalar(select(User).where(
+        User.email == email, User.account_type.in_(PORTALS[data.portal]), User.is_suspended.is_(False),
+    ))
     if user is None or (
         email in DEVELOPMENT_ACCOUNTS.values() and seeded_account(db, user.id) and not enabled(DATABASE_URL)
     ):
@@ -80,6 +82,8 @@ def request_recovery(data: RecoveryRequest, db: Db, background: BackgroundTasks)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     reserved = db.execute(update(User).where(
         User.id == user.id,
+        User.is_suspended.is_(False),
+        User.session_generation == user.session_generation,
         or_(User.recovery_requested_at.is_(None), User.recovery_requested_at <= now - timedelta(minutes=5)),
     ).values(recovery_requested_at=now).execution_options(synchronize_session=False))
     if reserved.rowcount == 1:
@@ -104,7 +108,7 @@ def reset_password(data: RecoveryReset, db: Db):
     except (jwt.InvalidTokenError, ValueError, TypeError):
         raise invalid from None
     user = db.get(User, user_id)
-    if user is None or user.recovery_requested_at is None or not hmac.compare_digest(
+    if user is None or user.is_suspended or user.recovery_requested_at is None or not hmac.compare_digest(
         payload['binding'], password_binding(user, PURPOSE),
     ):
         raise invalid
@@ -115,6 +119,7 @@ def reset_password(data: RecoveryReset, db: Db):
         raise HTTPException(422, 'Use at least 12 characters for an administrator password.')
     changed = db.execute(update(User).where(
         User.id == user_id, User.password_hash == user.password_hash,
+        User.is_suspended.is_(False), User.session_generation == user.session_generation,
         User.recovery_requested_at == requested_at,
     ).values(
         password_hash=password_hash.hash(data.password),

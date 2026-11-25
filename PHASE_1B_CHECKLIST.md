@@ -51,7 +51,16 @@ If a release is rolled back, keep the additive columns in place. Avoid rolling b
 
 ## Read-only privileged account review
 
-The Platform Owner can open **Super Admin → Manage administrators** to search and page through administrators. The directory lists role, contact details, and creation date. The server denies access to ordinary Super Admins. Account creation, suspension and permission changes remain pending.
+The Platform Owner can open **Super Admin → Manage administrators** to search and page through administrators. The directory lists role, contact details, creation date, and access status. The server denies access to ordinary Super Admins. Account creation and permission changes remain pending.
+
+### Administrator access controls
+
+Revision `0032_administrator_access` adds an active-by-default suspension flag and a nullable session generation. Apply it to the intended database before releasing the updated backend. Existing sessions remain valid until a password reset, suspension, explicit revocation, or normal expiry.
+
+1. In an isolated test environment, sign in as the Platform Owner and as a second Super Admin in separate browser sessions.
+2. In **Manage administrators**, choose **Sign out all sessions** for the second account. Enter a reason and confirm the existing session is rejected while a fresh sign-in succeeds.
+3. Choose **Suspend** and confirm the second account cannot sign in or use existing sessions. Choose **Reactivate** and confirm the account needs to sign in again. The owner row has no access actions.
+4. Use the administrative audit query below to check the acting owner, target administrator, and actions. Preserve the migration columns on rollback because older releases do not enforce these restrictions.
 
 For a new local Platform Owner, run `..\..\.venv\Scripts\python.exe -m tools.setup_admin` from `aquafarm-manager\backend` after migrating the intended local database. The command requests name, email, mobile number and hidden password confirmation. With `DATABASE_URL` unset, it uses the local backend SQLite database. For a hosted bootstrap, verify the target and obtain explicit authorization first. The command preserves an existing owner and does not promote an account.
 
@@ -88,6 +97,7 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Farmer approval, Super Admin dashboard and permissions | Partially implemented |
 | Bootstrap administrator and owner designation | Partially implemented |
 | Owner-only administrator directory | Newly implemented and locally verified |
+| Administrator suspension, reactivation and session revocation | Newly implemented and locally verified |
 | Public Super Admin provisioning blocked | Verified on the hosted website |
 | Internal administrator creation and recovery | Not implemented |
 | Internal financial institution registration | Partially implemented |

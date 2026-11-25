@@ -1927,7 +1927,8 @@ function App(){
   </details>}
  </>}
  {page==='admin'&&user?.is_platform_admin&&<>
- {user.is_platform_owner&&<AdministratorDirectory load={json}/>}
+ {user.is_platform_owner&&<AdministratorDirectory load={json}
+   changeAccess={(id,action,reason)=>json(`/admin/administrators/${id}/access`,{action,reason})}/>}
  <section className="panel">
  <h2>Stakeholder Approvals</h2>
  <h3>Financial institutions</h3>

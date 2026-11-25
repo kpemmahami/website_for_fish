@@ -20,7 +20,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints, model_validator
 from pwdlib import PasswordHash
-from sqlalchemy import DateTime, ForeignKey, String, Float, Text, Boolean, create_engine, select
+from sqlalchemy import DateTime, ForeignKey, String, Float, Text, Boolean, create_engine, false, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
@@ -48,6 +48,8 @@ class User(Base):
     phone_number: Mapped[str | None] = mapped_column(String(16), nullable=True)
     recovery_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     password_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_suspended: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    session_generation: Mapped[str | None] = mapped_column(String(32))
     sms_daily_records_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sms_loan_reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -223,8 +225,10 @@ def get_db():
 Db = Annotated[Session, Depends(get_db)]
 
 def password_binding(user: User, purpose: str) -> str:
-    message = f'{purpose}:{user.id}:{user.password_hash}'.encode()
-    return hmac.new(SECRET_KEY.encode(), message, hashlib.sha256).hexdigest()
+    message = f'{purpose}:{user.id}:{user.password_hash}'
+    if user.session_generation is not None:
+        message += f':{user.session_generation}'
+    return hmac.new(SECRET_KEY.encode(), message.encode(), hashlib.sha256).hexdigest()
 
 
 def current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer)], db: Db) -> User:
@@ -238,9 +242,11 @@ def current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(be
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail='User no longer exists')
+    if user.is_suspended:
+        raise HTTPException(status_code=401, detail='Invalid or expired token')
     binding = payload.get('binding')
     if (
-        (binding is None and user.password_reset_at is not None)
+        (binding is None and (user.password_reset_at is not None or user.session_generation is not None))
         or (binding is not None and (
             not isinstance(binding, str) or not hmac.compare_digest(binding, password_binding(user, 'access'))
         ))
@@ -365,7 +371,7 @@ def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> T
             raise HTTPException(status_code=401, detail='Invalid credentials')
         if identifier in DEVELOPMENT_ACCOUNTS and not seeded_account(db, user.id):
             raise HTTPException(status_code=401, detail='Invalid credentials')
-    if user is None or user.account_type not in account_types or not password_hash.verify(data.password, user.password_hash):
+    if user is None or user.is_suspended or user.account_type not in account_types or not password_hash.verify(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid credentials')
     token = jwt.encode({
         'sub': str(user.id), 'purpose': 'access', 'binding': password_binding(user, 'access'),

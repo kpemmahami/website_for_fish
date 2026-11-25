@@ -153,6 +153,39 @@ def test_administrator_directory_is_owner_only():
     assert owner_row['phone_number'] == '+233271234567'
 
 
+def test_owner_controls_administrator_access_and_invalidates_sessions():
+    owner = admin_headers()
+    email = 'managed-administrator@example.com'
+    with SessionLocal.begin() as db:
+        account = new_user(Register(**credentials(email)), 'admin')
+        db.add(account)
+        db.flush()
+        account_id = account.id
+    path = f'/admin/administrators/{account_id}/access'
+    original = login('admin', email)
+    suspend = {'action': 'suspend', 'reason': 'Access review'}
+    assert client.post(path, headers=original, json=suspend).status_code == 403
+    owner_id = client.get('/auth/me', headers=owner).json()['id']
+    assert client.post(f'/admin/administrators/{owner_id}/access', headers=owner, json=suspend).status_code == 403
+    assert client.post(path, headers=owner, json={**suspend, 'reason': ' '}).status_code == 422
+    assert client.post(path, headers=owner, json={**suspend, 'action': 'revoke_sessions'}).status_code == 200
+    assert client.get('/auth/me', headers=original).status_code == 401
+    before_suspension = login('admin', email)
+    assert client.post(path, headers=owner, json=suspend).status_code == 200
+    assert client.post(path, headers=owner, json=suspend).status_code == 409
+    assert client.get('/auth/me', headers=before_suspension).status_code == 401
+    assert client.post('/auth/admin/login', json={'email': email, 'password': PASSWORD}).status_code == 401
+    assert client.post(path, headers=owner, json={**suspend, 'action': 'reactivate'}).status_code == 200
+    assert client.get('/auth/me', headers=before_suspension).status_code == 401
+    assert client.get('/auth/me', headers=login('admin', email)).status_code == 200
+    with SessionLocal() as db:
+        logs = db.scalars(select(AuditLog).where(
+            AuditLog.entity_type == 'platform_admin', AuditLog.entity_id == account_id,
+        ).order_by(AuditLog.id)).all()
+        assert [entry.action for entry in logs] == ['revoke_sessions', 'suspend', 'reactivate']
+        assert all(entry.actor_id == owner_id for entry in logs)
+
+
 def test_institution_registration_rolls_back_partial_provisioning(monkeypatch):
     from sqlalchemy.exc import IntegrityError
 
