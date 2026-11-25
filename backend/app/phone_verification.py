@@ -71,7 +71,10 @@ def request_phone_verification(user: AuthenticatedUser, db: Db):
     return {'verified': False, 'destination': f'•••{phone[-4:]}'}
 
 
-def save_challenge(db: Db, account: User, phone: str, code: str, previous_code: str | None = None):
+def save_challenge(
+    db: Db, account: User, phone: str, code: str, previous_code: str | None = None,
+    *, purpose: str | None = None,
+):
     now = datetime.now(timezone.utc)
     challenge = db.get(AccountPhoneChallenge, account.id)
     too_soon = HTTPException(429, 'Wait two minutes before requesting another code')
@@ -85,7 +88,7 @@ def save_challenge(db: Db, account: User, phone: str, code: str, previous_code: 
         'previous_phone': account.phone_number if previous_code is not None else None,
         'previous_code_digest': code_digest(account.id, account.phone_number, nonce, previous_code)
         if previous_code is not None else None,
-        'password_proof': password_binding(account, 'phone-replacement') if previous_code is not None else None,
+        'password_proof': password_binding(account, purpose) if purpose is not None else None,
     }
     if challenge is None:
         db.add(AccountPhoneChallenge(user_id=account.id, **values))
@@ -115,7 +118,7 @@ def confirm_phone_verification(data: PhoneVerificationIn, user: AuthenticatedUse
     now = datetime.now(timezone.utc)
     challenge = db.get(AccountPhoneChallenge, user.id)
     invalid = HTTPException(400, 'Invalid or expired verification code')
-    if challenge is None or challenge.previous_phone is not None or challenge.phone_number != user.phone_number:
+    if challenge is None or challenge.password_proof is not None or challenge.phone_number != user.phone_number:
         raise invalid
     valid = hmac.compare_digest(challenge.code_digest, code_digest(
         user.id, challenge.phone_number, challenge.nonce, data.code,
@@ -168,7 +171,7 @@ def request_phone_replacement(data: PhoneReplacementStart, user: AuthenticatedUs
         raise HTTPException(409, 'This phone number is already assigned to an account')
     code = f'{secrets.randbelow(1_000_000):06d}'
     previous_code = f'{secrets.randbelow(1_000_000):06d}'
-    save_challenge(db, account, data.phone_number, code, previous_code)
+    save_challenge(db, account, data.phone_number, code, previous_code, purpose='phone-replacement')
     send_code(old_phone, previous_code, 'current phone approval')
     send_code(data.phone_number, code, 'new phone verification')
     return {'previous_destination': f'•••{old_phone[-4:]}', 'new_destination': f'•••{data.phone_number[-4:]}'}
@@ -212,3 +215,31 @@ def confirm_phone_replacement(data: PhoneReplacementConfirm, user: Authenticated
             raise HTTPException(409, 'This phone number is already assigned to an account') from None
         raise
     return {'message': 'Phone number changed. Sign in again with the new number or your email.'}
+
+
+def send_institution_setup_code(db: Db, account: User):
+    phone = account.phone_number
+    if not phone:
+        raise HTTPException(409, 'A mobile number is required for institution password setup')
+    code = f'{secrets.randbelow(1_000_000):06d}'
+    save_challenge(db, account, phone, code, purpose='institution-phone-setup')
+    send_code(phone, code, 'institution account verification')
+    return {'destination': f'•••{phone[-4:]}'}
+
+
+def verify_institution_setup_code(db: Db, account: User, code: str) -> None:
+    challenge = db.get(AccountPhoneChallenge, account.id)
+    invalid = HTTPException(400, 'Invalid or expired institution verification code')
+    if (
+        challenge is None or challenge.previous_phone is not None or challenge.phone_number != account.phone_number
+        or not challenge.password_proof
+        or not hmac.compare_digest(challenge.password_proof, password_binding(account, 'institution-phone-setup'))
+    ):
+        raise invalid
+    valid = hmac.compare_digest(challenge.code_digest, code_digest(
+        account.id, challenge.phone_number, challenge.nonce, code,
+    ))
+    consume_attempt(db, challenge, datetime.now(timezone.utc), valid, invalid)
+    if not valid:
+        db.commit()
+        raise invalid

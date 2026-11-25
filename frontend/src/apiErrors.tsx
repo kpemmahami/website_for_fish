@@ -128,7 +128,10 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
    if(status===403&&detail==='The current password is incorrect')return 'The current password is incorrect.';
    if(status===503)return 'The verification SMS could not be sent. Try again later.';
  }
- if(path==='/auth/institution/initial-password'&&status===400)return 'This password setup session expired or was already used. Return to sign in.';
+ if(path==='/auth/institution/initial-password'&&status===400&&detail==='Invalid or expired institution verification code')
+   return 'The SMS code is invalid or expired.';
+ if(path.startsWith('/auth/institution/initial-password')&&status===400)return 'This password setup session expired or was already used. Return to sign in.';
+ if(path==='/auth/institution/initial-password/verification'&&status===503)return 'The verification SMS could not be sent. Try again later.';
  if(path==='/auth/institution/initial-password'&&status===422&&detail==='Choose a password different from the initial password')return detail+'.';
  if(path==='/auth/admin/login'&&status===401&&detail==='Invalid or already used authenticator code')return 'Enter a fresh code from your authenticator app.';
  if(['/auth/admin/contact-verification','/auth/admin/activate'].includes(path)&&status===400)

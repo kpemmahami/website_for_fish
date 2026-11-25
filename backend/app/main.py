@@ -140,10 +140,14 @@ class InitialPasswordChallenge(BaseModel):
     initial_password_token: str
 
 
-class InitialPasswordChange(BaseModel):
+class InitialPasswordProof(BaseModel):
     model_config = ConfigDict(extra='forbid')
     token: str = Field(min_length=1, max_length=2048)
+
+
+class InitialPasswordChange(InitialPasswordProof):
     password: str = Field(min_length=12, max_length=128)
+    code: str = Field(pattern=r'^[0-9]{6}$')
 
 
 INITIAL_PASSWORD_PURPOSE = 'institution_initial_password'
@@ -345,6 +349,7 @@ async def safe_registration_validation(request: Request, error: RequestValidatio
     if request.method == 'POST' and request.url.path in (
         FARMER_REGISTRATION_PATHS | {
             '/auth/institution/initial-password', '/auth/me/phone-verification/confirm',
+            '/auth/institution/initial-password/verification',
             '/auth/me/phone-replacement/request', '/auth/me/phone-replacement/confirm',
         }
     ):
@@ -455,26 +460,42 @@ def institution_login(data: Login, db: Db):
     return login_account(data, db, ('institution', 'legacy'))
 
 
-@app.post('/auth/institution/initial-password')
-def replace_initial_password(data: InitialPasswordChange, db: Db):
+def initial_password_account(token: str, db: Session) -> User:
     invalid = HTTPException(400, 'This password setup session is invalid or expired')
     try:
-        payload = jwt.decode(data.token, SECRET_KEY, algorithms=['HS256'],
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'],
                              options={'require': ['exp', 'sub', 'purpose', 'binding']})
         account_id = int(payload['sub'])
         if payload['purpose'] != INITIAL_PASSWORD_PURPOSE or not isinstance(payload['binding'], str):
             raise invalid
     except (InvalidTokenError, TypeError, ValueError):
         raise invalid from None
-    user = db.get(User, account_id)
+    user = db.scalar(select(User).where(User.id == account_id).with_for_update())
     if (
         user is None or user.is_suspended or user.account_type != 'institution'
         or not user.initial_password_required
         or not hmac.compare_digest(payload['binding'], password_binding(user, INITIAL_PASSWORD_PURPOSE))
     ):
         raise invalid
+    return user
+
+
+@app.post('/auth/institution/initial-password/verification')
+def send_initial_password_verification(data: InitialPasswordProof, db: Db):
+    from .phone_verification import send_institution_setup_code
+
+    return send_institution_setup_code(db, initial_password_account(data.token, db))
+
+
+@app.post('/auth/institution/initial-password')
+def replace_initial_password(data: InitialPasswordChange, db: Db):
+    from .phone_verification import verify_institution_setup_code
+
+    user = initial_password_account(data.token, db)
     if password_hash.verify(data.password, user.password_hash):
         raise HTTPException(422, 'Choose a password different from the initial password')
+    verify_institution_setup_code(db, user, data.code)
+    now = datetime.now(timezone.utc)
     changed = db.execute(update(User).where(
         User.id == user.id,
         User.account_type == 'institution',
@@ -485,11 +506,12 @@ def replace_initial_password(data: InitialPasswordChange, db: Db):
     ).values(
         password_hash=password_hash.hash(data.password),
         initial_password_required=False,
-        password_reset_at=datetime.now(timezone.utc),
+        password_reset_at=now,
+        phone_verified_at=now,
         recovery_requested_at=None,
     ).execution_options(synchronize_session=False))
     if changed.rowcount != 1:
-        raise invalid
+        raise HTTPException(400, 'This password setup session is invalid or expired')
     audit(db, user, 'replace_initial_password', 'user', user.id)
     db.commit()
     return {'message': 'Password updated. Sign in with your new password.'}

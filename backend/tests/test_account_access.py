@@ -71,6 +71,8 @@ def register_institution(email, institution):
 
 
 def complete_initial_password(email, initial_password):
+    from unittest.mock import patch
+
     path = '/auth/institution/login'
     credentials_in = {'email': email, 'password': initial_password}
     first = client.post(path, json=credentials_in)
@@ -80,16 +82,30 @@ def complete_initial_password(email, initial_password):
     token = challenge['initial_password_token']
     assert client.get('/finance/institutions/mine', headers={'Authorization': f'Bearer {token}'}).status_code == 401
     setup_path = '/auth/institution/initial-password'
-    if len(initial_password) >= 12:
-        assert client.post(setup_path, json={'token': token, 'password': initial_password}).status_code == 422
     password = 'a-private-institution-password-741'
-    changed = {'token': token, 'password': password}
+    changed = {'token': token, 'password': password, 'code': '111111'}
+    assert client.post(setup_path, json=changed).status_code == 400
+    with patch('app.phone_verification.hubtel_send_sms') as send_sms:
+        sent = client.post(f'{setup_path}/verification', json={'token': token})
+        assert sent.status_code == 200
+        phone, message = send_sms.call_args.args
+        assert sent.json() == {'destination': '•••' + phone[-4:]}
+        assert client.post(f'{setup_path}/verification', json={'token': token}).status_code == 429
+        assert send_sms.call_count == 1
+    code = message.split(': ')[1].split('.')[0]
+    if len(initial_password) >= 12:
+        assert client.post(setup_path, json={**changed, 'password': initial_password, 'code': code}).status_code == 422
+    wrong = '999999' if code != '999999' else '000000'
+    assert client.post(setup_path, json={**changed, 'code': wrong}).status_code == 400
+    changed['code'] = code
     assert client.post(setup_path, json=changed).status_code == 200
     assert client.post(setup_path, json=changed).status_code == 400
     assert client.post(path, json=credentials_in).status_code == 401
     login_response = client.post(path, json={**credentials_in, 'password': password})
     assert login_response.status_code == 200, login_response.text
-    return {'Authorization': f"Bearer {login_response.json()['access_token']}"}
+    headers = {'Authorization': f"Bearer {login_response.json()['access_token']}"}
+    assert client.get('/auth/me', headers=headers).json()['phone_verified_at']
+    return headers
 
 
 def test_account_boundaries_and_institution_rejection(monkeypatch):

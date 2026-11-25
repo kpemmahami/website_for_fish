@@ -346,6 +346,7 @@ function App(){
  const [adminEnrollment,setAdminEnrollment]=useState<{enrollment_token:string;setup_key:string;account_email:string}|null>(null);
  const [needsAuthenticator,setNeedsAuthenticator]=useState(false);
  const [initialPasswordToken,setInitialPasswordToken]=useState('');
+ const [institutionSetupDestination,setInstitutionSetupDestination]=useState('');
  useEffect(()=>{
    if(administratorContactToken)window.history.replaceState(null,'',window.location.pathname+window.location.search);
  },[administratorContactToken]);
@@ -997,6 +998,7 @@ function App(){
        });
        if(portal==='institution'&&result.initial_password_token){
          setInitialPasswordToken(result.initial_password_token);
+         setInstitutionSetupDestination('');
          setShowLoginPassword(false);
          setForm({email:identifier});
          return;
@@ -1285,22 +1287,38 @@ function App(){
  ];
  if(initialPasswordToken)return <div className="authwrap"><div className="authcard">
    <h1>Set your institution password</h1>
-   <p>Choose a private password before accessing your institution workspace.</p>
+   <p>{institutionSetupDestination
+     ? `Enter the SMS code sent to ${institutionSetupDestination} and choose a new private password.`
+     : 'Verify the phone number saved on your account before choosing a private password.'}</p>
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
-   <form onSubmit={async event=>{
+   <button type="button" className="outline" disabled={busy} onClick={async()=>{
+     setBusy(true);setError('');
+     try{
+       const result=await json('/auth/institution/initial-password/verification',{token:initialPasswordToken});
+       setInstitutionSetupDestination(result.destination);
+       setForm({...form,institution_setup_code:''});
+     }catch(problem){setError(String(problem))}
+     finally{setBusy(false)}
+   }}>{institutionSetupDestination?'Resend SMS code':'Send SMS code'}</button>
+   {institutionSetupDestination&&<form onSubmit={async event=>{
      event.preventDefault();setError('');
      if(form.password!==form.confirm_password){setError('The passwords do not match.');return}
      setBusy(true);
      try{
-       const result=await json('/auth/institution/initial-password',{token:initialPasswordToken,password:form.password});
+       const result=await json('/auth/institution/initial-password',{
+         token:initialPasswordToken,password:form.password,code:form.institution_setup_code,
+       });
        setInitialPasswordToken('');setForm({email:form.email});setNotice(result.message);
      }catch(problem){setError(String(problem))}
      finally{setBusy(false)}
    }}>
+     {field('institution_setup_code','SMS verification code','text',{
+       required:true,pattern:'[0-9]{6}',maxLength:6,inputMode:'numeric',autoComplete:'one-time-code',
+     })}
      {field('password','New password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
      {field('confirm_password','Confirm new password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
      <button className="primary" disabled={busy}>Set password</button>
-   </form>
+   </form>}
    <button className="textbutton" type="button" disabled={busy} onClick={()=>{
      setInitialPasswordToken('');setForm({email:form.email});setError('');
    }}>Back to sign in</button>
