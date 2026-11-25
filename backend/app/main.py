@@ -2,7 +2,6 @@ import hashlib
 import hmac
 import logging
 import os
-import re
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -25,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from .database import database_failure_reason, database_url
+from .phone_numbers import PhoneNumber, normalize_phone_number
 
 DATABASE_URL = database_url()
 SECRET_KEY = os.getenv('SECRET_KEY')
@@ -114,6 +114,7 @@ class Register(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 class FarmerRegister(Register):
+    phone_number: PhoneNumber
     business_type: Literal['farmer','processor','integrated'] = 'farmer'
 
 
@@ -138,7 +139,7 @@ class UserOut(BaseModel):
     phone_number: str | None
     sms_daily_records_enabled: bool
     sms_loan_reminders_enabled: bool
-    account_type: Literal['legacy', 'farmer', 'institution', 'admin']
+    account_type: Literal['legacy', 'farmer', 'pending_farmer', 'institution', 'admin']
     is_platform_admin: bool = False
     is_platform_owner: bool = False
 
@@ -232,7 +233,7 @@ def password_binding(user: User, purpose: str) -> str:
     return hmac.new(SECRET_KEY.encode(), message.encode(), hashlib.sha256).hexdigest()
 
 
-def current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer)], db: Db) -> User:
+def authenticated_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer)], db: Db) -> User:
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=['HS256'])
         if payload.get('purpose', 'access') != 'access':
@@ -254,6 +255,15 @@ def current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(be
     ):
         raise HTTPException(status_code=401, detail='Invalid or expired token')
     return user
+
+AuthenticatedUser = Annotated[User, Depends(authenticated_user)]
+
+
+def current_user(user: AuthenticatedUser) -> User:
+    if user.account_type == 'pending_farmer':
+        raise HTTPException(403, 'Farmer account approval is pending')
+    return user
+
 
 CurrentUser = Annotated[User, Depends(current_user)]
 
@@ -323,7 +333,8 @@ def duplicate_email(error: IntegrityError) -> bool:
 @app.post('/auth/register', response_model=UserOut, status_code=201)
 @app.post('/auth/farmer/register', response_model=UserOut, status_code=201)
 def register(data: FarmerRegister, db: Db):
-    user = new_user(data, 'farmer')
+    user = new_user(data, 'pending_farmer')
+    user.phone_number = data.phone_number
     db.add(user)
     try:
         db.flush()
@@ -344,22 +355,13 @@ def register(data: FarmerRegister, db: Db):
     return response
 
 
-def login_phone_number(identifier: str) -> str | None:
-    number = re.sub(r'[\s().-]', '', identifier)
-    if re.fullmatch(r'0[0-9]{9}', number):
-        number = '+233' + number[1:]
-    elif re.fullmatch(r'233[0-9]{9}', number):
-        number = '+' + number
-    return number if re.fullmatch(r'\+[1-9][0-9]{7,14}', number) else None
-
-
 def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token:
     from .development import DEVELOPMENT_ACCOUNTS, enabled, seeded_account
 
     identifier = data.email.lower()
     local_test = enabled(DATABASE_URL)
     email = DEVELOPMENT_ACCOUNTS.get(identifier, identifier) if local_test else identifier
-    phone = login_phone_number(identifier)
+    phone = normalize_phone_number(identifier)
     if phone is not None:
         matches = db.scalars(select(User).where(
             User.phone_number == phone, User.account_type.in_(account_types),
@@ -388,7 +390,7 @@ def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> T
 @app.post('/auth/login', response_model=Token)
 @app.post('/auth/farmer/login', response_model=Token)
 def login(data: Login, db: Db):
-    return login_account(data, db, ('farmer', 'legacy'))
+    return login_account(data, db, ('farmer', 'legacy', 'pending_farmer'))
 
 
 @app.post('/auth/institution/login', response_model=Token)
@@ -407,7 +409,7 @@ def require_platform_admin(user: User):
 
 
 @app.get('/auth/me', response_model=UserOut)
-def me(user: CurrentUser, db: Db):
+def me(user: AuthenticatedUser, db: Db):
     from .administration import is_platform_owner
 
     return UserOut.model_validate(user).model_copy(update={

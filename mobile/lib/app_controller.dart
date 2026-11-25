@@ -65,7 +65,7 @@ class AppController extends ChangeNotifier {
     if (token != null) {
       try {
         user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
-        await refresh();
+        if (user?['account_type'] != 'pending_farmer') await refresh();
       } on ApiException catch (exception) {
         if (exception.statusCode == 401) {
           await signOut();
@@ -120,7 +120,7 @@ class AppController extends ChangeNotifier {
       api.token = token;
       await _preferences.setString('access_token', token!);
       user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
-      await refresh();
+      if (user?['account_type'] != 'pending_farmer') await refresh();
     } on Object catch (exception) {
       error = exception.toString();
     } finally {
@@ -132,6 +132,7 @@ class AppController extends ChangeNotifier {
   Future<void> registerAndAuthenticate({
     required String fullName,
     required String email,
+    required String phoneNumber,
     required String password,
   }) async {
     loading = true;
@@ -141,6 +142,7 @@ class AppController extends ChangeNotifier {
       await api.send('POST', '/auth/register', body: {
         'full_name': fullName.trim(),
         'email': email.trim(),
+        'phone_number': phoneNumber.trim(),
         'password': password,
       });
       final response = Map<String, dynamic>.from(await api.send(
@@ -152,7 +154,28 @@ class AppController extends ChangeNotifier {
       api.token = token;
       await _preferences.setString('access_token', token!);
       user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
-      await refresh();
+      if (user?['account_type'] != 'pending_farmer') await refresh();
+    } on Object catch (exception) {
+      error = exception.toString();
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> checkApproval() async {
+    loading = true;
+    error = null;
+    notifyListeners();
+    try {
+      user = Map<String, dynamic>.from(await api.get('/auth/me') as Map);
+      if (user?['account_type'] != 'pending_farmer') await refresh();
+    } on ApiException catch (exception) {
+      if (exception.statusCode == 401) {
+        await signOut();
+      } else {
+        error = exception.message;
+      }
     } on Object catch (exception) {
       error = exception.toString();
     } finally {

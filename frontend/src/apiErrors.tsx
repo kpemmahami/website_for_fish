@@ -1,7 +1,7 @@
 ﻿import {AlertTriangle, X} from 'lucide-react';
 
 const fields:Record<string,string>={
- email:'email address',full_name:'full name',password:'password',business_type:'business type',name:'name',quantity_kg:'quantity',
+ email:'email address',full_name:'full name',phone_number:'mobile phone number',password:'password',business_type:'business type',name:'name',quantity_kg:'quantity',
  amount_ghs:'payment amount',requested_ghs:'requested amount',price_ghs_per_kg:'selling price',
  feed_id:'feed type',session_number:'feeding session',actual_fed_at:'actual feeding time',
  dead_count:'fish count',stocked_count:'stocking quantity',expected_harvest_on:'harvest date',

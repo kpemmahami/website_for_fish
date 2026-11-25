@@ -12,6 +12,7 @@ import {ProductionIntelligence} from './productionIntelligence';
 import {LoanAppraisalReport} from './loanAppraisalReport';
 import {InstitutionStaff} from './institutionStaff';
 import {AdministratorDirectory} from './administratorDirectory';
+import {FarmerApprovals} from './farmerApprovals';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, RefreshCw, CheckCircle2, AlertTriangle, PlusCircle, Building2, Sprout, Pencil, Archive, X, LocateFixed, Camera, RotateCcw, ChevronDown, ArrowLeft, CalendarDays, ClipboardList, Droplets, TrendingUp, Package, LifeBuoy, ShoppingBasket, Users, Settings, Eye, EyeOff} from 'lucide-react';
@@ -408,7 +409,7 @@ function App(){
    const info=await json('/processing/business');setProcessingBusiness(info);
  },[json,token]);
  useEffect(()=>{
-   if(user&&user.account_type!=='institution'&&!user.is_platform_admin)void refreshProcessingBusiness().catch(()=>setProcessingBusiness(null));
+   if(user&&user.account_type!=='institution'&&user.account_type!=='pending_farmer'&&!user.is_platform_admin)void refreshProcessingBusiness().catch(()=>setProcessingBusiness(null));
  },[user,refreshProcessingBusiness]);
  const processorOnly=processingBusiness?.business_type==='processor'&&processingBusiness?.is_owner!==false;
  const loadHarvestSchedule=useCallback(async()=>{
@@ -471,7 +472,8 @@ function App(){
      :`/finance/loans/${loanId}/evidence?${query.toString()}`;
    return (await api(path,{method:'POST',headers:{'Content-Type':recording.blob.type||'video/webm'},body:recording.blob})).json();
  }
- const loadBase=useCallback(async()=>{if(!token)return;try{const [u,f,i,m]=await Promise.all([json('/auth/me'),json('/farms'),json('/finance/institutions'),json('/finance/institutions/mine')]);setUser(u);setPage(old=>u.is_platform_admin?'admin':u.account_type==='institution'?'lender':old==='admin'?'overview':old);setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false});setFarms(f);setInstitutions(i);setMine(m);setPendingInstitutions(u.is_platform_admin?await json('/finance/admin/institutions'):[]);setFarmId(old=>{
+ const loadBase=useCallback(async()=>{if(!token)return;try{const u=await json('/auth/me');setUser(u);if(u.account_type==='pending_farmer'){setError('');return}
+ const [f,i,m]=await Promise.all([json('/farms'),json('/finance/institutions'),json('/finance/institutions/mine')]);setPage(old=>u.is_platform_admin?'admin':u.account_type==='institution'?'lender':old==='admin'?'overview':old);setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false});setFarms(f);setInstitutions(i);setMine(m);setPendingInstitutions(u.is_platform_admin?await json('/finance/admin/institutions'):[]);setFarmId(old=>{
   const saved=Number(sessionStorage.getItem('aquafarm-selected-farm:'+u.id));
   return f.some((x:Obj)=>x.id===old)?old:f.some((x:Obj)=>x.id===saved)?saved:f[0]?.id??null;
  });setInstitutionId(old=>m.some((x:Obj)=>x.id===old)?old:m[0]?.id??null);setError('')}catch(e){setError(String(e))}},[json,token]);
@@ -984,9 +986,9 @@ function App(){
    try{
      if(authMode==='register'){
        if(portal!=='farmer')return;
-       await json('/auth/farmer/register',{...credentials,full_name:form.full_name,business_type:form.business_type??'farmer'});
+       await json('/auth/farmer/register',{...credentials,full_name:form.full_name,phone_number:form.phone_number,business_type:form.business_type??'farmer'});
        setAuthMode('login');setForm({email:form.email});
-       setNotice('Account created. Sign in to continue.');
+       setNotice('Account submitted for approval. Sign in to check its status.');
      }else{
        const result=await json(`/auth/${portal}/login`,{
          ...credentials,...(portal==='admin'&&needsAuthenticator?{authenticator_code:form.authenticator_code}:{}),
@@ -1358,6 +1360,7 @@ function App(){
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}{notice&&<div className="success">{notice}</div>}
    <form onSubmit={authenticate}>
      {authMode==='register'&&field('full_name','Full Name','text',{required:true,maxLength:120,autoComplete:'name'})}
+     {authMode==='register'&&field('phone_number','Mobile phone number','tel',{required:true,maxLength:64,autoComplete:'tel'})}
      {authMode==='register'?field('email','Email','email',{required:true,autoComplete:'email'}):field('email','Email or phone number','text',{required:true,maxLength:255,autoComplete:'username'})}
      {authMode==='login'?<div className="field">
        <label htmlFor="sign-in-password"><span>Password</span></label>
@@ -1384,6 +1387,13 @@ function App(){
    {portal==='farmer'&&<button className="textbutton" disabled={busy} onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setShowLoginPassword(false);setError('');setNotice('');setForm({})}}>
      {authMode==='register'?'Back to sign in':'Create a farmer account'}
    </button>}
+ </div></div>;
+ if(user?.account_type==='pending_farmer')return <div className="authwrap"><div className="authcard">
+   <h1>Account pending approval</h1>
+   <p>An AquaFarm administrator needs to approve your account before you can use the dashboard.</p>
+   {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
+   <button className="primary" type="button" onClick={()=>void loadBase()}>Check approval status</button>
+   <button className="textbutton" type="button" onClick={logout}>Sign out</button>
  </div></div>;
  if(!user)return <div className="authwrap"><div className="authcard">
    {error?<><div className="alert">{error}</div><button onClick={logout}>Return to sign in</button></>:<p role="status">Loading your workspace?</p>}
@@ -1982,6 +1992,7 @@ function App(){
   </details>}
  </>}
  {page==='admin'&&user?.is_platform_admin&&<>
+ <FarmerApprovals load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>
  {user.is_platform_owner&&<AdministratorDirectory load={json}
    prepare={details=>json('/admin/administrators',details)}
    sendVerification={id=>json(`/admin/administrators/${id}/contact-verification`,{})}
@@ -1992,6 +2003,7 @@ function App(){
  <details><summary>Register institution</summary>
  <form className="farmform" autoComplete="off" onSubmit={e=>formSubmit(e,'/finance/admin/institutions',{
    full_name:form.institution_admin_name,email:form.institution_admin_email,password:form.institution_admin_password,
+   phone_number:form.institution_admin_phone,
    institution:{name:form.institution_name,institution_type:form.institution_type,account_number:form.institution_reference}
  },()=>setForm({}))}>
    {field('institution_name','Official institution name','text',{required:true,minLength:3,maxLength:180})}
@@ -1999,6 +2011,7 @@ function App(){
    {field('institution_reference','Institution registration or account reference','text',{required:true,minLength:3,maxLength:100})}
    {field('institution_admin_name','Initial administrator full name','text',{required:true,maxLength:120})}
    {field('institution_admin_email','Initial administrator official email','email',{required:true})}
+   {field('institution_admin_phone','Initial administrator mobile phone','tel',{required:true,maxLength:64})}
    {field('institution_admin_password','Initial administrator password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
    <button className="primary" disabled={busy}>Register institution</button>
  </form>

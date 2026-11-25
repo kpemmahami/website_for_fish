@@ -17,7 +17,7 @@ from .development import DEVELOPMENT_ACCOUNTS, enabled, seeded_account
 from .main import DATABASE_URL, SECRET_KEY, Db, User, app, audit, password_binding, password_hash
 
 log = logging.getLogger(__name__)
-PORTALS = {'farmer': ('farmer', 'legacy'), 'institution': ('institution', 'legacy'), 'admin': ('admin',)}
+PORTALS = {'farmer': ('farmer', 'legacy', 'pending_farmer'), 'institution': ('institution', 'legacy'), 'admin': ('admin',)}
 PURPOSE = 'password_recovery'
 GENERIC_RESPONSE = {'message': 'If the email is eligible for recovery, you will receive a password reset link.'}
 

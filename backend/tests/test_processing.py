@@ -2,7 +2,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from .test_api import client
+from .test_api import approve_test_registration, client
 from .test_operations import auth
 from app.forecasting import CycleExpense, ProductionPlan
 from app.main import SessionLocal
@@ -28,9 +28,9 @@ def test_processor_only_workflow_uses_expense_and_sales_ledgers():
     email='processor-only@example.com'
     password='DedicatedProcessor123'
     registered=client.post('/auth/farmer/register',json={
-        'full_name':'Processor Only','email':email,'password':password,'business_type':'processor',
+        'full_name':'Processor Only','phone_number':'0245550105','email':email,'password':password,'business_type':'processor',
     })
-    assert registered.status_code==201,registered.text
+    approve_test_registration(registered)
     token=client.post('/auth/farmer/login',json={'email':email,'password':password}).json()['access_token']
     headers={'Authorization':'Bearer '+token}
     assert client.get('/farms',headers=headers).json()==[]

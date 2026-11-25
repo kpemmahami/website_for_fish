@@ -64,7 +64,7 @@ def admin_headers():
 
 def register_institution(email, institution):
     response = client.post('/finance/admin/institutions', headers=admin_headers(), json={
-        **credentials(email), 'institution': institution,
+        **credentials(email), 'phone_number': '0245550106', 'institution': institution,
     })
     assert response.status_code == 201, response.text
     return login('institution', email), response
@@ -75,16 +75,29 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
     monkeypatch.setenv('AQUAFARM_PLATFORM_ADMIN_EMAIL', email)
     registration = client.post('/auth/farmer/register', json={**credentials(email), 'account_type': 'admin'})
     assert registration.status_code == 422
-    registration = client.post('/auth/farmer/register', json=credentials(email))
+    registration = client.post('/auth/farmer/register', json={**credentials(email), 'phone_number': '0245550107'})
     assert registration.status_code == 201
     assert registration.json()['is_platform_admin'] is False
     farmer = login('farmer', email)
     assert client.post('/auth/admin/login', json={'email': email, 'password': PASSWORD}).status_code == 401
     assert client.get('/finance/admin/institutions/pending', headers=farmer).status_code == 403
+    assert client.get('/auth/me', headers=farmer).json()['account_type'] == 'pending_farmer'
+    assert client.get('/farms', headers=farmer).status_code == 403
+    assert client.get('/processing/business', headers=farmer).status_code == 403
+    approval_path = f"/admin/farmers/{registration.json()['id']}/approve"
+    assert client.post(approval_path, headers=farmer).status_code == 403
+    admin = admin_headers()
+    assert registration.json()['id'] in {
+        row['id'] for row in client.get('/admin/farmers/pending', headers=admin).json()['items']
+    }
+    assert client.post(approval_path, headers=admin).status_code == 200
+    assert client.post(approval_path, headers=admin).status_code == 404
+    assert client.get('/auth/me', headers=farmer).json()['account_type'] == 'farmer'
+    assert client.get('/farms', headers=farmer).status_code == 200
     assert client.post('/auth/admin/invitations', headers=farmer, json={'email': 'abc@example.com'}).status_code == 404
 
     institution = {'name': 'Pending Test Bank', 'institution_type': 'bank', 'account_number': 'TEST-001'}
-    payload = {**credentials('unapproved-institution@example.com'), 'institution': institution}
+    payload = {**credentials('unapproved-institution@example.com'), 'phone_number': '0245550106', 'institution': institution}
     assert client.post('/auth/institution/register', json=payload).status_code == 404
     assert client.post('/finance/institutions', json=payload).status_code == 405
     assert client.post('/finance/admin/institutions', json=payload).status_code == 401
@@ -94,7 +107,7 @@ def test_account_boundaries_and_institution_rejection(monkeypatch):
     lender_email = 'access-lender@example.com'
     lender, response = register_institution(lender_email, institution)
     assert client.post('/finance/admin/institutions', headers=admin_headers(), json={
-        **credentials(lender_email), 'institution': institution,
+        **credentials(lender_email), 'phone_number': '0245550106', 'institution': institution,
     }).status_code == 409
     institution_id = response.json()['id']
     base = f'/finance/institutions/{institution_id}'
@@ -278,7 +291,7 @@ def test_institution_registration_rolls_back_partial_provisioning(monkeypatch):
     email = 'rollback-institution@example.com'
     name = 'Rollback Test Bank'
     response = client.post('/finance/admin/institutions', headers=admin_headers(), json={
-        **credentials(email),
+        **credentials(email), 'phone_number': '0245550106',
         'institution': {'name': name, 'institution_type': 'bank', 'account_number': 'TEST-ROLLBACK'},
     })
     assert response.status_code == 409

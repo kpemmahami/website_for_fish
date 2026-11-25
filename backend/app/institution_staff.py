@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .lending import InstitutionMember, member
 from .main import AuditLog, Base, CurrentUser, Db, Register, User, app, audit, new_user
+from .phone_numbers import PhoneNumber
 
 StaffRole = Literal['loan_officer', 'credit_manager', 'disbursement', 'collections', 'viewer', 'officer', 'reviewer']
 TAG = ['Institution staff']
@@ -38,7 +39,7 @@ class StaffInvitation(Base):
 
 
 class CreateStaffIn(Register):
-    phone_number: str = Field(pattern=r'^\+[1-9]\d{7,14}$')
+    phone_number: PhoneNumber
     department: str | None = Field(default=None, max_length=120)
     job_title: str | None = Field(default=None, max_length=120)
     role: StaffRole

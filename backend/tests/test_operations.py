@@ -1,11 +1,11 @@
 from datetime import date, datetime, timedelta, timezone
-from .test_api import client
+from .test_api import approve_test_registration, client
 from .test_foundation import upload_operation_evidence
 
 
 def auth(email):
-    data = {'full_name': 'Operations Tester', 'email': email, 'password': 'a-very-long-password-123'}
-    assert client.post('/auth/register', json=data).status_code == 201
+    data = {'full_name': 'Operations Tester', 'phone_number': '0245550103', 'email': email, 'password': 'a-very-long-password-123'}
+    approve_test_registration(client.post('/auth/register', json=data))
     token = client.post('/auth/login', json={'email': email, 'password': data['password']}).json()['access_token']
     return {'Authorization': f'Bearer {token}'}
 

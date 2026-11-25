@@ -17,13 +17,14 @@ FRONTEND = 'https://frontend.example.invalid'
 def test_registration_persists_farmer_and_processing_business():
     with SessionLocal() as db:
         dialect = db.bind.dialect.name
-    for business_type in ('farmer', 'processor', 'integrated'):
+    for business_type, phone in zip(('farmer', 'processor', 'integrated'), ('0245550121', '+233245550122', '233245550123')):
         email = f'registration-{business_type}-{dialect}@example.com'
-        body = {'full_name': 'New account', 'email': email, 'password': PASSWORD, 'business_type': business_type}
+        body = {'full_name': 'New account', 'email': email, 'password': PASSWORD, 'phone_number': phone, 'business_type': business_type}
         result = client.post(PATH, json=body)
         assert result.status_code == 201, result.text
         user = result.json()
-        assert user['account_type'] == 'farmer' and user['is_platform_admin'] is False
+        assert user['phone_number'].startswith('+233')
+        assert user['account_type'] == 'pending_farmer' and user['is_platform_admin'] is False
         assert 'password' not in user and 'password_hash' not in user
         with SessionLocal() as db:
             stored = db.get(User, user['id'])
@@ -39,9 +40,11 @@ def test_registration_persists_farmer_and_processing_business():
 
 
 def test_registration_validation_does_not_echo_sensitive_input():
-    data = {'full_name':'Account', 'email':'validation-test@example.com', 'password':PASSWORD}
+    data = {'full_name':'Account', 'email':'validation-test@example.com', 'password':PASSWORD, 'phone_number':'0245550108'}
     invalid = (
         ({'password': PASSWORD}, 'email'),
+        ({key: value for key, value in data.items() if key != 'phone_number'}, 'phone_number'),
+        ({**data, 'phone_number': '123'}, 'phone_number'),
         ({**data, 'business_type':'admin'}, 'business_type'),
         ({**data, 'password':'short'}, 'password'),
         ({**data, 'account_type':'admin'}, 'account_type'),
@@ -64,7 +67,7 @@ def test_registration_rolls_back_and_reports_database_error_safely(monkeypatch, 
         app.dependency_overrides[get_db] = lambda: db
         try:
             response = client.post(PATH, json={'full_name':'Account','email':email,
-                                               'password':PASSWORD,'business_type':'integrated'})
+                                               'password':PASSWORD,'phone_number':'0245550109','business_type':'integrated'})
         finally:
             app.dependency_overrides.pop(get_db)
         assert response.status_code == 503

@@ -1,14 +1,14 @@
 from datetime import date
 from pathlib import Path
-from .test_api import client
+from .test_api import approve_test_registration, client
 from .test_foundation import upload_operation_evidence
 
 
 def auth(email):
     password = 'a-very-long-password-123'
-    assert client.post('/auth/register', json={
-        'full_name': 'Evidence Tester', 'email': email, 'password': password
-    }).status_code == 201
+    approve_test_registration(client.post('/auth/register', json={
+        'full_name': 'Evidence Tester', 'phone_number': '0245550104', 'email': email, 'password': password
+    }))
     token = client.post('/auth/login', json={'email': email, 'password': password}).json()['access_token']
     return {'Authorization': f'Bearer {token}'}
 

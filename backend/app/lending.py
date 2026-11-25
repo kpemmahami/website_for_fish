@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import Base, app, Db, CurrentUser, User, Farm, owned_farm, audit, Register, new_user, require_platform_admin
 from .dashboard import build_dashboard
+from .phone_numbers import PhoneNumber
 
 
 def now(): return datetime.now(timezone.utc)
@@ -476,6 +477,7 @@ def build_appraisal_snapshot(farm_id, user, db, data):
 
 
 class InstitutionRegistration(Register):
+    phone_number: PhoneNumber
     institution: InstitutionIn
 
 
@@ -491,6 +493,7 @@ def add_institution(data, user, db):
 def register_institution(data: InstitutionRegistration, administrator: CurrentUser, db: Db):
     require_platform_admin(administrator)
     user = new_user(data, 'institution')
+    user.phone_number = data.phone_number
     db.add(user)
     try:
         db.flush()

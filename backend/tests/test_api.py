@@ -30,10 +30,18 @@ from alembic.config import Config
 from alembic import command
 config = Config("alembic.ini")
 command.upgrade(config, "head")
-from app.main import app
+from app.main import SessionLocal, User, app
 
 client = TestClient(app)
 _loan_video_number = 0
+
+
+def approve_test_registration(response):
+    assert response.status_code == 201, response.text
+    with SessionLocal.begin() as db:
+        account = db.get(User, response.json()['id'])
+        assert account.account_type == 'pending_farmer'
+        account.account_type = 'farmer'
 
 def upload_loan_video(headers, farm_id, record_type, loan_id=None):
     global _loan_video_number
@@ -53,8 +61,8 @@ def upload_loan_video(headers, farm_id, record_type, loan_id=None):
 
 def test_farm_ownership():
     def signup(email):
-        r = client.post('/auth/register', json={'full_name':'Test Farmer','email':email,'password':'a-very-long-password-123'})
-        assert r.status_code == 201, r.text
+        r = client.post('/auth/register', json={'full_name':'Test Farmer','phone_number':'0245550101','email':email,'password':'a-very-long-password-123'})
+        approve_test_registration(r)
         token = client.post('/auth/login', json={'email':email,'password':'a-very-long-password-123'}).json()['access_token']
         return {'Authorization': f'Bearer {token}'}
     a = signup('farmer1@example.com')

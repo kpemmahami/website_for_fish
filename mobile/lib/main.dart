@@ -78,9 +78,43 @@ class _AppBootstrapState extends State<AppBootstrap> {
           animation: widget.controller,
           builder: (context, _) => widget.controller.user == null
               ? LoginPage(controller: widget.controller)
-              : MobileHome(controller: widget.controller),
+              : widget.controller.user?['account_type'] == 'pending_farmer'
+                  ? ApprovalPendingPage(controller: widget.controller)
+                  : MobileHome(controller: widget.controller),
         );
       },
+    );
+  }
+}
+
+class ApprovalPendingPage extends StatelessWidget {
+  const ApprovalPendingPage({required this.controller, super.key});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Account pending approval', style: Theme.of(context).textTheme.headlineSmall),
+                const Text('An AquaFarm administrator needs to approve your account.'),
+                if (controller.error != null) Text(controller.error!),
+                FilledButton(
+                  onPressed: controller.loading ? null : controller.checkApproval,
+                  child: const Text('Check approval status'),
+                ),
+                TextButton(onPressed: controller.signOut, child: const Text('Sign out')),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -98,6 +132,7 @@ class _LoginPageState extends State<LoginPage> {
   final _formKey = GlobalKey<FormState>();
   final _name = TextEditingController();
   final _email = TextEditingController();
+  final _phone = TextEditingController();
   final _password = TextEditingController();
   bool _register = false;
   bool _showPassword = false;
@@ -106,6 +141,7 @@ class _LoginPageState extends State<LoginPage> {
   void dispose() {
     _name.dispose();
     _email.dispose();
+    _phone.dispose();
     _password.dispose();
     super.dispose();
   }
@@ -116,6 +152,7 @@ class _LoginPageState extends State<LoginPage> {
       await widget.controller.registerAndAuthenticate(
         fullName: _name.text,
         email: _email.text,
+        phoneNumber: _phone.text,
         password: _password.text,
       );
     } else {
@@ -206,12 +243,25 @@ class _LoginPageState extends State<LoginPage> {
                         if (_register) const SizedBox(height: 12),
                         TextFormField(
                           controller: _email,
-                          keyboardType: TextInputType.emailAddress,
-                          autofillHints: const [AutofillHints.email],
-                          decoration: const InputDecoration(labelText: 'Email'),
-                          validator: (value) =>
-                              value != null && value.contains('@') ? null : 'Enter a valid email',
+                          keyboardType: _register ? TextInputType.emailAddress : TextInputType.text,
+                          autofillHints: [_register ? AutofillHints.email : AutofillHints.username],
+                          decoration: InputDecoration(labelText: _register ? 'Email' : 'Email or phone number'),
+                          validator: (value) => (value?.trim().isEmpty ?? true)
+                              ? 'Enter your email or phone number'
+                              : _register && !value!.contains('@') ? 'Enter a valid email' : null,
                         ),
+                        if (_register) ...[
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            controller: _phone,
+                            keyboardType: TextInputType.phone,
+                            autofillHints: const [AutofillHints.telephoneNumber],
+                            decoration: const InputDecoration(labelText: 'Mobile phone number'),
+                            validator: (value) => (value?.trim().isEmpty ?? true)
+                                ? 'Enter your mobile phone number'
+                                : null,
+                          ),
+                        ],
                         const SizedBox(height: 12),
                         TextFormField(
                           controller: _password,

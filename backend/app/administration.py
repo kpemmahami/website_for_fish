@@ -6,14 +6,15 @@ from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Query
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, EmailStr, StringConstraints
 from sqlalchemy import DateTime, ForeignKey, String, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import (
-    AdminRegister, Base, CurrentUser, Db, User, app, audit, login_phone_number, new_user,
+    AdminRegister, Base, CurrentUser, Db, User, app, audit, new_user, require_platform_admin,
 )
+from .phone_numbers import PhoneNumber, normalize_phone_number
 
 
 class AdminSetup(Base):
@@ -35,7 +36,7 @@ def bootstrap_admin(data: AdminRegister, db: Session, *, phone_number: str) -> N
     data = AdminRegister.model_validate(data.model_dump())
     if db.get(AdminSetup, 1) is not None:
         raise ValueError('First administrator setup has already been completed')
-    phone = login_phone_number(phone_number)
+    phone = normalize_phone_number(phone_number)
     if phone is None:
         raise ValueError('Enter a Ghanaian or international mobile phone number')
     if db.scalar(select(User.id).where(User.account_type == 'admin', User.phone_number == phone).limit(1)):
@@ -61,6 +62,28 @@ def is_platform_owner(user: User, db: Session) -> bool:
 def require_platform_owner(user: User, db: Session) -> None:
     if not is_platform_owner(user, db):
         raise HTTPException(403, 'Platform owner access required')
+
+
+@app.get('/admin/farmers/pending', tags=['Platform administration'])
+def pending_farmers(user: CurrentUser, db: Db, offset: int = Query(0, ge=0)):
+    require_platform_admin(user)
+    rows = db.execute(select(User.id, User.full_name, User.email, User.phone_number, User.created_at)
+                      .where(User.account_type == 'pending_farmer')
+                      .order_by(User.created_at, User.id).offset(offset).limit(51))
+    items = [dict(row._mapping) for row in rows]
+    return {'items': items[:50], 'has_more': len(items) > 50}
+
+
+@app.post('/admin/farmers/{farmer_id}/approve', tags=['Platform administration'])
+def approve_farmer(farmer_id: int, user: CurrentUser, db: Db):
+    require_platform_admin(user)
+    result = db.execute(update(User).where(User.id == farmer_id, User.account_type == 'pending_farmer')
+                        .values(account_type='farmer'))
+    if result.rowcount != 1:
+        raise HTTPException(404, 'Pending farmer account not found')
+    audit(db, user, 'approve', 'farmer_account', farmer_id)
+    db.commit()
+    return {'message': 'Farmer account approved.'}
 
 
 @app.get('/admin/administrators', tags=['Platform administration'])
@@ -98,15 +121,13 @@ class PendingAdministratorIn(BaseModel):
     model_config = ConfigDict(extra='forbid')
     full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
     email: EmailStr
-    phone_number: str = Field(max_length=64)
+    phone_number: PhoneNumber
 
 
 @app.post('/admin/administrators', status_code=201, tags=['Platform administration'])
 def prepare_administrator(data: PendingAdministratorIn, user: CurrentUser, db: Db):
     require_platform_owner(user, db)
-    phone = login_phone_number(data.phone_number)
-    if phone is None:
-        raise HTTPException(422, 'Enter a Ghanaian or international phone number')
+    phone = data.phone_number
     db.scalar(select(AdminSetup.id).where(AdminSetup.id == 1).with_for_update())
     if db.scalar(select(User.id).where(
         User.account_type.in_(('admin', 'pending_admin')), User.phone_number == phone,
