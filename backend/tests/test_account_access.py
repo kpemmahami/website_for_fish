@@ -153,6 +153,82 @@ def test_administrator_directory_is_owner_only():
     assert owner_row['phone_number'] == '+233271234567'
 
 
+def test_only_owner_can_prepare_an_administrator_without_granting_access(monkeypatch):
+    import base64
+    import hmac
+    from datetime import datetime, timezone
+    from urllib.parse import parse_qs
+
+    from app import administrator_verification as verification
+
+    class TestClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(1_800_000_015, tz)
+
+    monkeypatch.setattr(verification, 'datetime', TestClock)
+    monkeypatch.setenv('AQUAFARM_ADMIN_AUTHENTICATOR_KEY', 'fictional-authenticator-key-for-tests')
+
+    owner = admin_headers()
+    ordinary_email = 'normal-preparation-admin@example.com'
+    with SessionLocal.begin() as db:
+        db.add(new_user(Register(**credentials(ordinary_email)), 'admin'))
+    payload = {'email': 'pending-preparation@example.com', 'full_name': 'Pending Admin',
+               'phone_number': '0541234567'}
+    path = '/admin/administrators'
+    assert client.post(path, json=payload).status_code == 401
+    assert client.post(path, headers=login('admin', ordinary_email), json=payload).status_code == 403
+    assert client.post(path, headers=owner, json={**payload, 'role': 'owner'}).status_code == 422
+    created = client.post(path, headers=owner, json=payload)
+    assert created.status_code == 201
+    account_id = created.json()['id']
+    row = client.get(path, headers=owner, params={'search': payload['email']}).json()['items'][0]
+    assert row['pending_activation'] is True
+    assert row['phone_number'] == '+233541234567'
+    assert client.post(path, headers=owner, json={**payload, 'email': 'other-pending@example.com',
+                                                 'phone_number': '+233541234567'}).status_code == 409
+    assert client.post(f'{path}/{account_id}/access', headers=owner,
+                       json={'action': 'reactivate', 'reason': 'Test'}).status_code == 404
+    assert client.post('/auth/admin/login', json={'email': payload['email'],
+                                                 'password': PASSWORD}).status_code == 401
+    emails, messages = [], []
+    monkeypatch.setattr(verification, 'recovery_mail_settings', lambda: ('mock', 'test@example.com', 'https://example.com'))
+    monkeypatch.setattr(verification, 'send_account_email', lambda *args: emails.append(args) or True)
+    monkeypatch.setattr(verification, 'hubtel_send_sms', lambda *args: messages.append(args))
+    send_path = f'{path}/{account_id}/contact-verification'
+    assert client.post(send_path, headers=login('admin', ordinary_email)).status_code == 403
+    assert client.post(send_path, headers=owner).status_code == 200
+    assert client.post(send_path, headers=owner).status_code == 429
+    assert emails[0][1] == payload['email']
+    assert messages[0][0] == '+233541234567'
+    contact_token = parse_qs(emails[0][-1])['administrator-contact'][0]
+    code = messages[0][1].split(': ')[1].split('.')[0]
+    verify_path = '/auth/admin/contact-verification'
+    assert client.post(verify_path, json={'token': contact_token, 'code': '999999' if code != '999999' else '000000'}).status_code == 400
+    verified = client.post(verify_path, json={'token': contact_token, 'code': code})
+    assert verified.status_code == 200
+    assert client.post(verify_path, json={'token': contact_token, 'code': code}).status_code == 400
+    row = client.get(path, headers=owner, params={'search': payload['email']}).json()['items'][0]
+    assert row['pending_activation'] and row['contacts_verified_at']
+    enrollment = verified.json()
+    key = base64.b32decode(enrollment['setup_key'])
+
+    def totp(step):
+        value = hmac.digest(key, step.to_bytes(8, 'big'), 'sha1')
+        offset = value[-1] & 15
+        return f'{(int.from_bytes(value[offset:offset + 4], "big") & 0x7fffffff) % 1_000_000:06d}'
+
+    current = int(TestClock.now(timezone.utc).timestamp()) // 30
+    activation = {'token': enrollment['enrollment_token'], 'code': totp(current - 1), 'password': PASSWORD}
+    assert client.post('/auth/admin/activate', json=activation).status_code == 200
+    assert client.post('/auth/admin/activate', json=activation).status_code == 400
+    credentials_in = {'email': payload['email'], 'password': PASSWORD}
+    assert client.post('/auth/admin/login', json=credentials_in).status_code == 428
+    with_code = {**credentials_in, 'authenticator_code': totp(current)}
+    assert client.post('/auth/admin/login', json=with_code).status_code == 200
+    assert client.post('/auth/admin/login', json=with_code).status_code == 401
+
+
 def test_owner_controls_administrator_access_and_invalidates_sessions():
     owner = admin_headers()
     email = 'managed-administrator@example.com'

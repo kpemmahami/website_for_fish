@@ -119,6 +119,9 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
   return 'Registration is temporarily unavailable. Please try again.';
  }
  const login=/^\/auth\/(?:[^/]+\/)?login$/.test(path);
+ if(path==='/auth/admin/login'&&status===401&&detail==='Invalid or already used authenticator code')return 'Enter a fresh code from your authenticator app.';
+ if(['/auth/admin/contact-verification','/auth/admin/activate'].includes(path)&&status===400)
+   return 'The code or setup link is invalid or expired. If it expired, ask the Platform Owner to restart setup.';
  if(path==='/auth/password-recovery/request'&&status===503)return 'Password recovery email is unavailable. Contact support.';
  if(path==='/auth/password-recovery/reset'&&status===400)return 'This password reset link is invalid or expired. Request a new link.';
  if(path==='/auth/password-recovery/reset'&&status===422&&detail==='Use at least 12 characters for an administrator password.')return detail;

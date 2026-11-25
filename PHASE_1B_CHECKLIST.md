@@ -51,7 +51,15 @@ If a release is rolled back, keep the additive columns in place. Avoid rolling b
 
 ## Read-only privileged account review
 
-The Platform Owner can open **Super Admin → Manage administrators** to search and page through administrators. The directory lists role, contact details, creation date, and access status. The server denies access to ordinary Super Admins. Account creation and permission changes remain pending.
+The Platform Owner can open **Super Admin → Manage administrators** to search and page through administrators. The directory lists role, contact details, creation date, and access status. The server denies access to ordinary Super Admins. On the development branch, **Add Super Admin** prepares a pending account from a name, email, and mobile number. Pending accounts cannot sign in or be reactivated through the access controls. They activate through the contact and authenticator setup flow.
+
+### Pending administrator contact verification
+
+Revision `0033_admin_contact_proof` adds the verification challenge and authenticator state table. The owner selects **Send verification** for a pending account. The recipient opens the link sent to their email and enters the six-digit code sent to their phone. Challenges expire in ten minutes, allow five attempts, and require a two-minute wait before another send. A new send replaces the old challenge.
+
+After verifying both contacts, the recipient adds the displayed key to a time-based authenticator app, chooses a private password, and submits an authenticator code. On sign-in, enter the email or phone and password, then supply a fresh code when prompted. Codes used for activation or sign-in cannot be reused. Existing administrators retain their current sign-in flow. Their MFA enrollment and an audited lost-authenticator recovery process are pending.
+
+Live testing requires the existing Resend configuration and the backend secrets `HUBTEL_CLIENT_ID`, `HUBTEL_CLIENT_SECRET`, `HUBTEL_SMS_SENDER_ID`, and `AQUAFARM_ADMIN_AUTHENTICATOR_KEY`. Generate the authenticator key from at least 32 random bytes and keep it in Render's backend settings and secure backup. Changing it invalidates enrolled authenticators. Use fictional accounts and mocked delivery for automated tests.
 
 ### Administrator access controls
 
@@ -99,11 +107,14 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Owner-only administrator directory | Newly implemented and locally verified |
 | Administrator suspension, reactivation and session revocation | Newly implemented and locally verified |
 | Public Super Admin provisioning blocked | Verified on the hosted website |
-| Internal administrator creation and recovery | Not implemented |
+| Internal administrator creation and recovery | Partially implemented |
+| Pending administrator email and phone verification | Newly implemented and locally verified |
 | Internal financial institution registration | Partially implemented |
 | Email or registered phone sign-in across all three portals | Newly implemented and locally verified |
 | Compulsory normalized mobile numbers for all accounts | Partially implemented |
-| Phone verification, login MFA and trusted devices | Not implemented |
+| Authenticator enrollment and login MFA for newly provisioned administrators | Newly implemented and locally verified |
+| Existing administrator MFA enrollment and authenticator recovery | Not implemented |
+| General phone verification and trusted devices | Not implemented |
 | Password recovery by email | Newly implemented and locally verified |
 | Real recovery email delivery | Blocked by external configuration |
 | Authentication SMS integration | Not implemented |

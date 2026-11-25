@@ -339,6 +339,13 @@ function App(){
  const [showLoginPassword,setShowLoginPassword]=useState(false);
  const [forgotPassword,setForgotPassword]=useState(false);
  const [resetToken,setResetToken]=useState(()=>new URLSearchParams(window.location.hash.slice(1)).get('password-reset')??'');
+ const [administratorContactToken,setAdministratorContactToken]=useState(
+   ()=>new URLSearchParams(window.location.hash.slice(1)).get('administrator-contact')??'');
+ const [adminEnrollment,setAdminEnrollment]=useState<{enrollment_token:string;setup_key:string;account_email:string}|null>(null);
+ const [needsAuthenticator,setNeedsAuthenticator]=useState(false);
+ useEffect(()=>{
+   if(administratorContactToken)window.history.replaceState(null,'',window.location.pathname+window.location.search);
+ },[administratorContactToken]);
  useEffect(()=>{
    if(!resetToken)return;
    const target=new URLSearchParams(window.location.hash.slice(1)).get('portal');
@@ -981,12 +988,17 @@ function App(){
        setAuthMode('login');setForm({email:form.email});
        setNotice('Account created. Sign in to continue.');
      }else{
-       const result=await json(`/auth/${portal}/login`,credentials);
+       const result=await json(`/auth/${portal}/login`,{
+         ...credentials,...(portal==='admin'&&needsAuthenticator?{authenticator_code:form.authenticator_code}:{}),
+       });
        sessionStorage.setItem('aquafarm_token',result.access_token);
        setPage(portal==='admin'?'admin':portal==='institution'?'lender':'overview');
        setForm({});setToken(result.access_token);
      }
-   }catch(e){setError(String(e))}finally{setBusy(false)}
+   }catch(e){
+     if(portal==='admin'&&e instanceof UserFacingError&&e.status===428)setNeedsAuthenticator(true);
+     else setError(String(e));
+   }finally{setBusy(false)}
  }
  function logout(){sessionStorage.removeItem('aquafarm_token');window.location.reload()}
  async function openApp(id:number){try{setSelectedApp(await json(`/finance/institutions/${institutionId}/applications/${id}`));setForm({});setCustomSchedule([{due_on:'',principal_ghs:'',interest_ghs:'',fees_ghs:''}]);setError('')}catch(e){setError(String(e))}}
@@ -1261,6 +1273,46 @@ function App(){
   {kind:'financial',label:'Financial analysis',description:'Recorded costs, cost per kg and recommended prices',csv:'analytics/financial.csv'},
   {kind:'bank-ready',label:'Investment-ready report',description:'Production, sales, costs, receivables and evidence caveats',csv:'bank-ready.csv'},
  ];
+ if(adminEnrollment)return <div className="authwrap"><div className="authcard">
+   <h1>Set up your authenticator</h1>
+   <p>Add a time-based account in your authenticator app for {adminEnrollment.account_email}. Enter this setup key in the app.</p>
+   <label className="field"><span>Authenticator setup key</span><input readOnly value={adminEnrollment.setup_key} onFocus={event=>event.target.select()}/></label>
+   {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
+   <form onSubmit={async event=>{
+     event.preventDefault();setError('');
+     if(form.password!==form.confirm_password){setError('The passwords do not match.');return}
+     setBusy(true);
+     try{
+       const result=await json('/auth/admin/activate',{token:adminEnrollment.enrollment_token,code:form.authenticator_code,password:form.password});
+       setPortal('admin');setForm({email:adminEnrollment.account_email});setNotice(result.message);
+       setAdminEnrollment(null);
+     }catch(problem){setError(String(problem))}
+     finally{setBusy(false)}
+   }}>
+     {field('password','New password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
+     {field('confirm_password','Confirm password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
+     {field('authenticator_code','Authenticator code','text',{required:true,pattern:'[0-9]{6}',inputMode:'numeric',maxLength:6,autoComplete:'one-time-code'})}
+     <button className="primary" disabled={busy}>Activate account</button>
+   </form>
+ </div></div>;
+ if(administratorContactToken)return <div className="authwrap"><div className="authcard">
+   <h1>Verify administrator contacts</h1>
+   {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
+   {notice?<div className="success" role="status">{notice}</div>:<form onSubmit={async event=>{
+     event.preventDefault();setBusy(true);setError('');
+     try{
+       const result=await json('/auth/admin/contact-verification',{token:administratorContactToken,code:form.verification_code});
+       setForm({});setAdministratorContactToken('');setAdminEnrollment(result);
+     }catch(problem){setError(String(problem))}
+     finally{setBusy(false)}
+   }}>
+     {field('verification_code','SMS verification code','text',{required:true,minLength:6,maxLength:6,pattern:'[0-9]{6}',inputMode:'numeric',autoComplete:'one-time-code'})}
+     <button className="primary" disabled={busy}>Verify contacts</button>
+   </form>}
+   <button className="textbutton" type="button" disabled={busy} onClick={()=>{
+     setAdministratorContactToken('');setPortal('admin');setError('');setNotice('');setForm({});
+   }}>Return to sign in</button>
+ </div></div>;
  if(resetToken||(!token&&forgotPassword))return <div className="authwrap"><div className="authcard">
    <h1>{resetToken?'Set a new password':'Forgot password'}</h1>
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
@@ -1293,7 +1345,7 @@ function App(){
  if(!token)return <div className="authwrap"><div className="authcard">
    <div className="brand dark"><Waves size={30}/><span>AquaFarm <b>Manager Ghana</b></span></div>
    <label className="field"><span>Portal</span><select value={portal} disabled={busy} onChange={e=>{
-     setPortal(e.target.value as typeof portal);setAuthMode('login');setShowLoginPassword(false);setForm({});setError('');setNotice('');
+     setPortal(e.target.value as typeof portal);setAuthMode('login');setShowLoginPassword(false);setNeedsAuthenticator(false);setForm({});setError('');setNotice('');
    }}><option value="farmer">Farmer</option><option value="institution">Bank or financial institution</option><option value="admin">Super Admin / Platform administrator</option></select></label>
    {authMode==='login'&&(localTestPortal?<div className="workspace-tabs">
      <p className="muted">Choose a local test account to fill in its username and select its portal.</p>
@@ -1318,6 +1370,9 @@ function App(){
          </button>
        </div>
      </div>:field('password','Password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
+     {portal==='admin'&&needsAuthenticator&&field('authenticator_code','Authenticator code','text',{
+       required:true,pattern:'[0-9]{6}',inputMode:'numeric',maxLength:6,autoComplete:'one-time-code',
+     })}
      {authMode==='login'&&<button type="button" className="textbutton" disabled={busy} onClick={()=>{
        setForgotPassword(true);setShowLoginPassword(false);setForm({email:String(form.email??'').includes('@')?form.email:''});setError('');setNotice('');
      }}>Forgot password?</button>}
@@ -1928,6 +1983,8 @@ function App(){
  </>}
  {page==='admin'&&user?.is_platform_admin&&<>
  {user.is_platform_owner&&<AdministratorDirectory load={json}
+   prepare={details=>json('/admin/administrators',details)}
+   sendVerification={id=>json(`/admin/administrators/${id}/contact-verification`,{})}
    changeAccess={(id,action,reason)=>json(`/admin/administrators/${id}/access`,{action,reason})}/>}
  <section className="panel">
  <h2>Stakeholder Approvals</h2>

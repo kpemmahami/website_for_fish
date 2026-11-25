@@ -47,15 +47,20 @@ def recovery_mail_settings():
 
 
 def send_recovery_email(settings, email: str, token: str, portal: str) -> None:
-    key, sender, origin = settings
     fragment = urlencode({'password-reset': token, 'portal': portal})
+    send_account_email(settings, email, 'Reset your AquaFarm Manager Ghana password',
+                       'Open this link to reset your password within 15 minutes:', fragment)
+
+
+def send_account_email(settings, email: str, subject: str, instruction: str, fragment: str) -> bool:
+    key, sender, origin = settings
     request = Request('https://api.resend.com/emails', method='POST', headers={
         'Authorization': f'Bearer {key}', 'Content-Type': 'application/json',
         'User-Agent': 'AquaFarm-Password-Recovery/1.0',
     }, data=json.dumps({
-        'from': sender, 'to': [email], 'subject': 'Reset your AquaFarm Manager Ghana password',
+        'from': sender, 'to': [email], 'subject': subject,
         'text': (
-            f'Open this link to reset your password within 15 minutes:\n{origin}/#{fragment}\n\n'
+            f'{instruction}\n{origin}/#{fragment}\n\n'
             'If you did not request this, ignore this email.'
         ),
     }).encode())
@@ -63,7 +68,9 @@ def send_recovery_email(settings, email: str, token: str, portal: str) -> None:
         with urlopen(request, timeout=10):
             pass
     except (OSError, ValueError):
-        log.warning('Password recovery email delivery failed')
+        log.warning('Account security email delivery failed')
+        return False
+    return True
 
 
 @app.post('/auth/password-recovery/request', status_code=202)

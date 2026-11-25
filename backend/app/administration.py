@@ -1,11 +1,12 @@
 ﻿"""Platform administrator provisioning and ownership checks."""
 import json
+import secrets
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Query
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
 from sqlalchemy import DateTime, ForeignKey, String, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
@@ -67,8 +68,10 @@ def list_administrators(
     user: CurrentUser, db: Db, search: str = Query('', max_length=255),
     limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0),
 ):
+    from .administrator_verification import AdministratorContactProof
+
     require_platform_owner(user, db)
-    filters = [User.account_type == 'admin']
+    filters = [User.account_type.in_(('admin', 'pending_admin'))]
     if search.strip():
         term = search.strip().lower()
         filters.append(or_(
@@ -78,14 +81,50 @@ def list_administrators(
     total = db.scalar(select(func.count(User.id)).where(*filters))
     rows = db.execute(select(
         User.id, User.full_name, User.email, User.phone_number, User.created_at, User.is_suspended,
-    ).where(*filters).order_by(User.created_at.desc(), User.id.desc()).offset(offset).limit(limit))
+        User.account_type, AdministratorContactProof.verified_at.label('contacts_verified_at'),
+    ).outerjoin(AdministratorContactProof, AdministratorContactProof.user_id == User.id)
+      .where(*filters).order_by(User.created_at.desc(), User.id.desc()).offset(offset).limit(limit))
     return {
         'total': total,
         'items': [
-            {**row._mapping, 'role': 'Platform Owner' if row.id == user.id else 'Super Admin'}
+            {**row._mapping, 'role': 'Platform Owner' if row.id == user.id else 'Super Admin',
+             'pending_activation': row.account_type == 'pending_admin'}
             for row in rows
         ],
     }
+
+
+class PendingAdministratorIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    email: EmailStr
+    phone_number: str = Field(max_length=64)
+
+
+@app.post('/admin/administrators', status_code=201, tags=['Platform administration'])
+def prepare_administrator(data: PendingAdministratorIn, user: CurrentUser, db: Db):
+    require_platform_owner(user, db)
+    phone = login_phone_number(data.phone_number)
+    if phone is None:
+        raise HTTPException(422, 'Enter a Ghanaian or international phone number')
+    db.scalar(select(AdminSetup.id).where(AdminSetup.id == 1).with_for_update())
+    if db.scalar(select(User.id).where(
+        User.account_type.in_(('admin', 'pending_admin')), User.phone_number == phone,
+    ).limit(1)) is not None:
+        raise HTTPException(409, 'This phone number is already assigned to an administrator')
+    account = new_user(AdminRegister(
+        full_name=data.full_name, email=data.email, password=secrets.token_urlsafe(32),
+    ), 'pending_admin')
+    account.phone_number = phone
+    db.add(account)
+    try:
+        db.flush()
+        audit(db, user, 'prepare_administrator', 'platform_admin', account.id)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, 'An account with this email already exists') from None
+    return {'id': account.id, 'pending_activation': True}
 
 
 class AdministratorAccessChange(BaseModel):
