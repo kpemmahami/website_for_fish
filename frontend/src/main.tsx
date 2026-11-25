@@ -491,7 +491,14 @@ function App(){
    return (await api(path,{method:'POST',headers:{'Content-Type':recording.blob.type||'video/webm'},body:recording.blob})).json();
  }
  const loadBase=useCallback(async()=>{if(!token)return;try{const u=await json('/auth/me');setUser(u);if(u.account_type==='pending_farmer'){setError('');return}
- const [f,i,m]=await Promise.all([json('/farms'),json('/finance/institutions'),json('/finance/institutions/mine')]);setPage(old=>u.is_platform_admin?'admin':u.account_type==='institution'?'lender':old==='admin'?'overview':old);setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false});setFarms(f);setInstitutions(i);setMine(m);setPendingInstitutions(u.is_platform_admin?await json('/finance/admin/institutions'):[]);setFarmId(old=>{
+ if(u.is_platform_admin){
+   setPage('admin');
+   setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false});
+   setPendingInstitutions(await json('/finance/admin/institutions'));
+   setError('');
+   return;
+ }
+ const [f,i,m]=await Promise.all([json('/farms'),json('/finance/institutions'),json('/finance/institutions/mine')]);setPage(old=>u.account_type==='institution'?'lender':old==='admin'?'overview':old);setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false});setFarms(f);setInstitutions(i);setMine(m);setPendingInstitutions([]);setFarmId(old=>{
   const saved=Number(sessionStorage.getItem('aquafarm-selected-farm:'+u.id));
   return f.some((x:Obj)=>x.id===old)?old:f.some((x:Obj)=>x.id===saved)?saved:f[0]?.id??null;
  });setInstitutionId(old=>m.some((x:Obj)=>x.id===old)?old:m[0]?.id??null);setError('')}catch(e){setError(String(e))}},[json,token]);
@@ -2118,12 +2125,20 @@ function App(){
  </>}
  {page==='admin'&&user?.is_platform_admin&&<>
  {adminView&&<a className="outline" href={adminView.startsWith('institutions/')?'#admin/institutions':adminView.startsWith('farmers/')?'#admin/farmers':'#admin'}>Back</a>}
- {!adminView&&<section className="panel"><h2>Platform management</h2><div className="farmactions">
-  <a className="outline" href="#admin/farmers">Farmer and processor management</a>
-  <a className="outline" href="#admin/institutions">Financial institution management</a>
-  {user.is_platform_owner&&<a className="outline" href="#admin/administrators">Administrators</a>}
-  <a className="outline" href="#admin/security">Account security</a>
- </div></section>}
+ {!adminView&&<>
+  <section className="panel"><h2>Platform management</h2><div className="farmactions">
+   <a className="outline" href="#admin/farmers">Farmer and processor management</a>
+   <a className="outline" href="#admin/institutions">Financial institution management</a>
+   {user.is_platform_owner&&<a className="outline" href="#admin/administrators">Administrators</a>}
+   {user.is_platform_owner&&<a className="outline" href="#admin/administrators/pending">Pending administrator activation</a>}
+   <a className="outline" href="#admin/security">Account security</a>
+  </div></section>
+  <FarmerApprovals key="dashboard-pending" load={json} revision={workspaceRefresh}
+    approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>
+  <InstitutionReviewPages view="institutions/pending" rows={pendingInstitutions} owner={Boolean(user.is_platform_owner)}
+    search={institutionReviewSearch} setSearch={setInstitutionReviewSearch} busy={busy} decide={(id,status,reason,queue)=>
+      submit('/finance/admin/institutions/'+id+'/status',{status,reason},()=>{window.location.hash='admin/institutions/'+queue})}/>
+ </>}
  {adminView==='security'&&<section className="panel">
    {phoneVerification}
    <AdministratorAuthenticator phone={user.phone_number??null} enrolled={Boolean(user.authenticator_enrolled)}
@@ -2138,8 +2153,9 @@ function App(){
   </div>
  </section>}
  {adminView==='farmers/approved'&&<FarmerApprovals key="approved" load={json}/>}
- {adminView==='farmers/pending'&&<FarmerApprovals key="pending" load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>}
- {adminView==='administrators'&&user.is_platform_owner&&<AdministratorDirectory load={json}
+ {adminView==='farmers/pending'&&<FarmerApprovals key="pending" load={json} revision={workspaceRefresh} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>}
+ {['administrators','administrators/pending'].includes(adminView)&&user.is_platform_owner&&<AdministratorDirectory
+   key={adminView} pendingOnly={adminView==='administrators/pending'} load={json}
    loadActivity={(id,offset)=>json(`/admin/administrators/${id}/activity?offset=${offset}`)}
    prepare={details=>json('/admin/administrators',details)}
    sendVerification={id=>json(`/admin/administrators/${id}/contact-verification`,{})}

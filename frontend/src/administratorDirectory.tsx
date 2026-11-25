@@ -34,7 +34,8 @@ interface AdministratorDetails {
 
 const emptyDetails: AdministratorDetails = {full_name: '', email: '', phone_number: ''};
 
-export function AdministratorDirectory({load, loadActivity, changeAccess, prepare, sendVerification}: {
+export function AdministratorDirectory({load, loadActivity, changeAccess, prepare, sendVerification, pendingOnly=false}: {
+  pendingOnly?: boolean;
   load: (path: string) => Promise<DirectoryPage>;
   loadActivity: (id: number, offset: number) => Promise<ActivityPage>;
   changeAccess: (id: number, action: AccessAction, reason: string) => Promise<unknown>;
@@ -75,13 +76,14 @@ export function AdministratorDirectory({load, loadActivity, changeAccess, prepar
   useEffect(() => {
     let active = true;
     const params = new URLSearchParams({search, offset: String(offset), limit: String(pageSize)});
+    if (pendingOnly) params.set('pending_only', 'true');
     load('/admin/administrators?' + params).then(page => {
       if (active) setResult(page);
     }).catch(problem => {
       if (active) setError(String(problem));
     });
     return () => {active = false};
-  }, [load, search, offset, revision]);
+  }, [load, search, offset, revision, pendingOnly]);
 
   async function updateAccess(row: Administrator, action: AccessAction) {
     const label = {suspend: 'Suspend', reactivate: 'Reactivate', revoke_sessions: 'Sign out'}[action];
@@ -110,8 +112,8 @@ export function AdministratorDirectory({load, loadActivity, changeAccess, prepar
   }
 
   return <section className="panel">
-    <h2>Manage administrators</h2>
-    <details>
+    <h2>{pendingOnly ? 'Administrators awaiting secure activation' : 'Manage administrators'}</h2>
+    {!pendingOnly&&<details>
       <summary>Add Super Admin</summary>
       <p className="muted">The account will remain pending until secure activation is available.</p>
       <form className="farmform" onSubmit={async event => {
@@ -144,7 +146,7 @@ export function AdministratorDirectory({load, loadActivity, changeAccess, prepar
         </label>)}
         <button type="submit" className="primary" disabled={busy}>Prepare account</button>
       </form>
-    </details>
+    </details>}
     <form className="farmactions" onSubmit={event => {
       event.preventDefault();
       if (query.trim() === search && offset === 0) return;

@@ -69,11 +69,17 @@ def require_platform_owner(user: User, db: Session) -> None:
 
 
 @app.get('/admin/farmers/pending', tags=['Platform administration'])
-def pending_farmers(user: CurrentUser, db: Db, offset: int = Query(0, ge=0)):
+def pending_farmers(user: CurrentUser, db: Db, offset: int = Query(0, ge=0),
+                    search: str = Query('', max_length=255)):
     require_platform_admin(user)
-    rows = db.execute(select(User.id, User.full_name, User.email, User.phone_number, User.created_at)
-                      .where(User.account_type == 'pending_farmer')
-                      .order_by(User.created_at, User.id).offset(offset).limit(51))
+    query = select(User.id, User.full_name, User.email, User.phone_number, User.created_at).where(
+        User.account_type == 'pending_farmer',
+    )
+    if term := search.strip().lower():
+        query = query.where(or_(func.lower(User.full_name).contains(term, autoescape=True),
+                                func.lower(User.email).contains(term, autoescape=True),
+                                User.phone_number.contains(term, autoescape=True)))
+    rows = db.execute(query.order_by(User.created_at, User.id).offset(offset).limit(51))
     items = [dict(row._mapping) for row in rows]
     return {'items': items[:50], 'has_more': len(items) > 50}
 
@@ -103,11 +109,12 @@ def approve_farmer(farmer_id: int, user: CurrentUser, db: Db):
 def list_administrators(
     user: CurrentUser, db: Db, search: str = Query('', max_length=255),
     limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0),
+    pending_only: bool = False,
 ):
     from .administrator_verification import AdministratorContactProof
 
     require_platform_owner(user, db)
-    filters = [User.account_type.in_(('admin', 'pending_admin'))]
+    filters = [User.account_type == 'pending_admin' if pending_only else User.account_type.in_(('admin', 'pending_admin'))]
     if search.strip():
         term = search.strip().lower()
         filters.append(or_(
