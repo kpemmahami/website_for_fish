@@ -130,6 +130,7 @@ class Login(BaseModel):
     email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
     password: str
     authenticator_code: str | None = Field(default=None, pattern=r'^[0-9]{6}$')
+    recovery_code: str | None = Field(default=None, max_length=64)
 
 class Token(BaseModel):
     access_token: str
@@ -352,6 +353,7 @@ async def safe_registration_validation(request: Request, error: RequestValidatio
             '/auth/institution/initial-password', '/auth/me/phone-verification/confirm',
             '/auth/institution/initial-password/verification',
             '/auth/admin/authenticator-enrollment',
+            '/auth/admin/login', '/auth/admin/recovery-codes',
             '/auth/me/phone-replacement/request', '/auth/me/phone-replacement/confirm',
         }
     ):
@@ -445,9 +447,14 @@ def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> T
         'exp': datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES),
     }, SECRET_KEY, algorithm='HS256')
     if user.is_platform_admin:
-        from .administrator_verification import check_administrator_authenticator
+        from .administrator_verification import check_administrator_authenticator, use_administrator_recovery_code
 
-        check_administrator_authenticator(db, user, data.authenticator_code)
+        if data.recovery_code is not None:
+            if data.authenticator_code is not None:
+                raise HTTPException(422, 'Use one second factor at a time')
+            use_administrator_recovery_code(db, user, data.recovery_code)
+        else:
+            check_administrator_authenticator(db, user, data.authenticator_code)
     return Token(access_token=token)
 
 

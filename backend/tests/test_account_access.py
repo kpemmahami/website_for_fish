@@ -323,6 +323,25 @@ def test_existing_administrator_enrollment_revokes_old_sessions(monkeypatch):
     assert profile['authenticator_enrolled'] and profile['account_type'] == 'admin'
     assert client.post(route, headers=headers, json={'password': private_password}).status_code == 409
 
+    recovery_route = '/auth/admin/recovery-codes'
+    recovery_request = {'password': private_password, 'authenticator_code': '123456'}
+    assert client.post(recovery_route, json=recovery_request).status_code == 401
+    assert client.post(recovery_route, headers=headers,
+                       json={**recovery_request, 'password': 'incorrect'}).status_code == 403
+    monkeypatch.setattr(verification, 'matching_step', lambda *args: 102)
+    generated = client.post(recovery_route, headers=headers, json=recovery_request)
+    assert generated.status_code == 200
+    assert generated.headers['Cache-Control'] == 'no-store'
+    codes = generated.json()['codes']
+    assert len(codes) == len(set(codes)) == 8
+    recovery_login = {**sign_in, 'recovery_code': codes[0].lower()}
+    assert client.post('/auth/admin/login', json={**recovery_login, 'password': 'incorrect'}).status_code == 401
+    assert client.post('/auth/admin/login', json=recovery_login).status_code == 200
+    assert client.post('/auth/admin/login', json=recovery_login).status_code == 401
+    monkeypatch.setattr(verification, 'matching_step', lambda *args: 103)
+    assert client.post(recovery_route, headers=headers, json=recovery_request).status_code == 200
+    assert client.post('/auth/admin/login', json={**sign_in, 'recovery_code': codes[1]}).status_code == 401
+
 
 def test_owner_controls_administrator_access_and_invalidates_sessions():
     owner = admin_headers()

@@ -346,6 +346,7 @@ function App(){
    ()=>new URLSearchParams(window.location.hash.slice(1)).get('administrator-contact')??'');
  const [adminEnrollment,setAdminEnrollment]=useState<{enrollment_token:string;setup_key:string;account_email:string;existing_account:boolean}|null>(null);
  const [needsAuthenticator,setNeedsAuthenticator]=useState(false);
+ const [useRecoveryCode,setUseRecoveryCode]=useState(false);
  const [initialPasswordToken,setInitialPasswordToken]=useState('');
  const [institutionSetupDestination,setInstitutionSetupDestination]=useState('');
  useEffect(()=>{
@@ -995,7 +996,9 @@ function App(){
        setNotice('Account submitted for approval. Sign in to check its status.');
      }else{
        const result=await json(`/auth/${portal}/login`,{
-         ...credentials,...(portal==='admin'&&needsAuthenticator?{authenticator_code:form.authenticator_code}:{}),
+         ...credentials,...(portal==='admin'&&needsAuthenticator
+           ? useRecoveryCode?{recovery_code:form.recovery_code}:{authenticator_code:form.authenticator_code}
+           :{}),
        });
        if(portal==='institution'&&result.initial_password_token){
          setInitialPasswordToken(result.initial_password_token);
@@ -1400,7 +1403,7 @@ function App(){
  if(!token)return <div className="authwrap"><div className="authcard">
    <div className="brand dark"><Waves size={30}/><span>AquaFarm <b>Manager Ghana</b></span></div>
    <label className="field"><span>Portal</span><select value={portal} disabled={busy} onChange={e=>{
-     setPortal(e.target.value as typeof portal);setAuthMode('login');setShowLoginPassword(false);setNeedsAuthenticator(false);setForm({});setError('');setNotice('');
+     setPortal(e.target.value as typeof portal);setAuthMode('login');setShowLoginPassword(false);setNeedsAuthenticator(false);setUseRecoveryCode(false);setForm({});setError('');setNotice('');
    }}><option value="farmer">Farmer</option><option value="institution">Bank or financial institution</option><option value="admin">Super Admin / Platform administrator</option></select></label>
    {authMode==='login'&&(localTestPortal?<div className="workspace-tabs">
      <p className="muted">Choose a local test account to fill in its username and select its portal.</p>
@@ -1426,9 +1429,16 @@ function App(){
          </button>
        </div>
      </div>:field('password','Password','password',{required:true,minLength:8,maxLength:128,autoComplete:'new-password'})}
-     {portal==='admin'&&needsAuthenticator&&field('authenticator_code','Authenticator code','text',{
-       required:true,pattern:'[0-9]{6}',inputMode:'numeric',maxLength:6,autoComplete:'one-time-code',
-     })}
+     {portal==='admin'&&needsAuthenticator&&<>
+       {useRecoveryCode
+         ? field('recovery_code','Recovery code','text',{required:true,maxLength:64,autoComplete:'off',spellCheck:false})
+         : field('authenticator_code','Authenticator code','text',{
+           required:true,pattern:'[0-9]{6}',inputMode:'numeric',maxLength:6,autoComplete:'one-time-code',
+         })}
+       <button type="button" className="textbutton" disabled={busy} onClick={()=>{
+         setUseRecoveryCode(value=>!value);setError('');setForm({...form,authenticator_code:'',recovery_code:''});
+       }}>{useRecoveryCode?'Use an authenticator code':'Use a recovery code'}</button>
+     </>}
      {authMode==='login'&&<button type="button" className="textbutton" disabled={busy} onClick={()=>{
        setForgotPassword(true);setShowLoginPassword(false);setForm({email:String(form.email??'').includes('@')?form.email:''});setError('');setNotice('');
      }}>Forgot password?</button>}
@@ -2068,7 +2078,8 @@ function App(){
  <section className="panel">
    {phoneVerification}
    <AdministratorAuthenticator phone={user.phone_number??null} enrolled={Boolean(user.authenticator_enrolled)}
-     send={password=>json('/auth/admin/authenticator-enrollment',{password})}/>
+     send={password=>json('/auth/admin/authenticator-enrollment',{password})}
+     generateCodes={(password,authenticator_code)=>json('/auth/admin/recovery-codes',{password,authenticator_code})}/>
  </section>
  <FarmerApprovals load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>
  {user.is_platform_owner&&<AdministratorDirectory load={json}

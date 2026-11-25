@@ -3,13 +3,14 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, select, update
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String, delete, select, update
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .administration import AdminSetup, require_platform_owner
@@ -52,6 +53,18 @@ class ActivateAdministrator(VerifyAdministratorContact):
 class ExistingAdministratorEnrollment(BaseModel):
     model_config = ConfigDict(extra='forbid')
     password: str = Field(min_length=1, max_length=128)
+
+
+class RecoveryCodeRequest(ExistingAdministratorEnrollment):
+    authenticator_code: str = Field(pattern=r'^[0-9]{6}$')
+
+
+class AdministratorRecoveryCode(Base):
+    __tablename__ = 'administrator_recovery_codes'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    code_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 def digest(label: str, value: str) -> str:
@@ -247,7 +260,7 @@ def activate_administrator(data: ActivateAdministrator, db: Db):
     return {'message': 'Administrator account activated. Sign in with your new credentials.'}
 
 
-def check_administrator_authenticator(db, user: User, code: str | None) -> None:
+def check_administrator_authenticator(db, user: User, code: str | None, *, commit_success: bool = True) -> None:
     proof = db.get(AdministratorContactProof, user.id)
     if proof is None or (proof.last_authenticator_step is None and proof.existing_enrollment_proof is not None):
         return  # Preserve accounts created before authenticator enrollment was introduced.
@@ -270,6 +283,55 @@ def check_administrator_authenticator(db, user: User, code: str | None) -> None:
         AdministratorContactProof.authenticator_attempts == proof.authenticator_attempts,
         AdministratorContactProof.last_authenticator_step == proof.last_authenticator_step,
     ).values(**values).execution_options(synchronize_session=False))
-    db.commit()
     if claimed.rowcount != 1 or step is None:
+        db.commit()
         raise HTTPException(401, 'Invalid or already used authenticator code')
+    if commit_success:
+        db.commit()
+
+
+@app.post('/auth/admin/recovery-codes', tags=TAGS)
+def generate_administrator_recovery_codes(data: RecoveryCodeRequest, user: CurrentUser, db: Db, response: Response):
+    require_platform_admin(user)
+    account = db.scalar(select(User).where(User.id == user.id).with_for_update()
+                        .execution_options(populate_existing=True))
+    if account is None or account.is_suspended or not password_hash.verify(data.password, account.password_hash):
+        raise HTTPException(403, 'The current password is incorrect')
+    proof = db.get(AdministratorContactProof, account.id)
+    if proof is None or proof.last_authenticator_step is None:
+        raise HTTPException(409, 'An authenticator is required to generate recovery codes')
+    try:
+        check_administrator_authenticator(db, account, data.authenticator_code, commit_success=False)
+    except HTTPException as error:
+        if error.status_code == 401:
+            raise HTTPException(422, 'Enter a fresh code from your authenticator app') from None
+        raise
+    db.execute(delete(AdministratorRecoveryCode).where(AdministratorRecoveryCode.user_id == account.id))
+    now = datetime.now(timezone.utc)
+    codes = [secrets.token_hex(12).upper() for _ in range(8)]
+    db.add_all(AdministratorRecoveryCode(
+        user_id=account.id, code_digest=digest('recovery-code', f'{account.id}:{code}'), created_at=now,
+    ) for code in codes)
+    audit(db, account, 'generate_admin_recovery_codes', 'platform_admin', account.id)
+    db.commit()
+    response.headers['Cache-Control'] = 'no-store'
+    return {'codes': ['-'.join(code[index:index + 4] for index in range(0, len(code), 4)) for code in codes]}
+
+
+def use_administrator_recovery_code(db: Db, user: User, code: str) -> None:
+    normalized = re.sub(r'[\s-]', '', code).upper()
+    invalid = HTTPException(401, 'Invalid or already used recovery code')
+    if re.fullmatch(r'[0-9A-F]{24}', normalized) is None:
+        raise invalid
+    proof = db.get(AdministratorContactProof, user.id)
+    if proof is None or proof.last_authenticator_step is None:
+        raise invalid
+    used = db.execute(update(AdministratorRecoveryCode).where(
+        AdministratorRecoveryCode.user_id == user.id,
+        AdministratorRecoveryCode.code_digest == digest('recovery-code', f'{user.id}:{normalized}'),
+        AdministratorRecoveryCode.used_at.is_(None),
+    ).values(used_at=datetime.now(timezone.utc)))
+    if used.rowcount != 1:
+        raise invalid
+    audit(db, user, 'use_admin_recovery_code', 'platform_admin', user.id)
+    db.commit()

@@ -136,6 +136,9 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
  if(path==='/auth/institution/initial-password/verification'&&status===503)return 'The verification SMS could not be sent. Try again later.';
  if(path==='/auth/institution/initial-password'&&status===422&&detail==='Choose a password different from the initial password')return detail+'.';
  if(path==='/auth/admin/login'&&status===401&&detail==='Invalid or already used authenticator code')return 'Enter a fresh code from your authenticator app.';
+ if(path==='/auth/admin/login'&&status===401&&detail==='Invalid or already used recovery code')return 'That recovery code is invalid or has already been used.';
+ if(path==='/auth/admin/recovery-codes'&&status===422&&detail==='Enter a fresh code from your authenticator app')return detail+'.';
+ if(path==='/auth/admin/recovery-codes'&&status===403&&detail==='The current password is incorrect')return detail+'.';
  if(['/auth/admin/contact-verification','/auth/admin/activate'].includes(path)&&status===400)
    return 'The code or setup link is invalid or expired. If it expired, ask the Platform Owner to restart setup.';
  if(path==='/auth/password-recovery/request'&&status===503)return 'Password recovery email is unavailable. Contact support.';
