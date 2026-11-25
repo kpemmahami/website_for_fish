@@ -3,11 +3,13 @@ import json
 
 from fastapi import HTTPException, Query
 from pydantic import BaseModel, ConfigDict, EmailStr
-from sqlalchemy import Boolean, ForeignKey, Index, select
+from sqlalchemy import Boolean, ForeignKey, Index, false, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .main import AuditLog, Base, CurrentUser, Db, Farm, ProductionUnit, User, app, audit, owned_farm
+from .feeding import FeedLedger, FeedProduct
+from .operations import StockingCycle
 
 
 class FarmStaffUnitAccess(Base):
@@ -16,11 +18,31 @@ class FarmStaffUnitAccess(Base):
     unit_id: Mapped[int] = mapped_column(ForeignKey('production_units.id'), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
     is_active: Mapped[bool] = mapped_column(Boolean)
+    can_record_feeding: Mapped[bool] = mapped_column(Boolean, server_default=false())
 
 
 class UnitAccessGrant(BaseModel):
     model_config = ConfigDict(extra='forbid')
     email: EmailStr
+    can_record_feeding: bool = False
+
+
+def feeding_write_scope(farm_id: int, unit_id: int, user: User, db: Db):
+    farm = db.scalar(select(Farm).join(ProductionUnit, ProductionUnit.farm_id == Farm.id).where(
+        Farm.id == farm_id, Farm.archived_at.is_(None), ProductionUnit.id == unit_id,
+        ProductionUnit.is_active.is_(True),
+    ))
+    if farm is None:
+        raise HTTPException(404, 'Production unit not found')
+    if farm.owner_id == user.id:
+        return farm, False
+    assignment = db.scalar(select(FarmStaffUnitAccess).where(
+        FarmStaffUnitAccess.unit_id == unit_id, FarmStaffUnitAccess.user_id == user.id,
+        FarmStaffUnitAccess.is_active.is_(True), FarmStaffUnitAccess.can_record_feeding.is_(True),
+    ).with_for_update())
+    if assignment is None:
+        raise HTTPException(404, 'Production unit not found')
+    return farm, True
 
 
 @app.get('/farms/{farm_id}/staff-unit-access/activity')
@@ -43,6 +65,7 @@ def list_staff_unit_access(farm_id: int, user: CurrentUser, db: Db):
     owned_farm(farm_id, user, db)
     rows = db.execute(select(
         FarmStaffUnitAccess.user_id, FarmStaffUnitAccess.unit_id, FarmStaffUnitAccess.is_active,
+        FarmStaffUnitAccess.can_record_feeding,
         User.full_name, User.email, ProductionUnit.name.label('unit_name'),
     ).join(User, User.id == FarmStaffUnitAccess.user_id)
      .join(ProductionUnit, ProductionUnit.id == FarmStaffUnitAccess.unit_id)
@@ -66,14 +89,17 @@ def grant_unit_access(farm_id: int, unit_id: int, data: UnitAccessGrant, user: C
     if target is None or target.id == user.id:
         raise HTTPException(404, 'Eligible staff account not found')
     access = db.get(FarmStaffUnitAccess, (unit_id, target.id))
-    if access and access.is_active:
+    if access and access.is_active and access.can_record_feeding == data.can_record_feeding:
         raise HTTPException(409, 'This user already has access to the unit')
     if access is None:
-        db.add(FarmStaffUnitAccess(unit_id=unit_id, user_id=target.id, is_active=True))
+        db.add(FarmStaffUnitAccess(
+            unit_id=unit_id, user_id=target.id, is_active=True, can_record_feeding=data.can_record_feeding,
+        ))
     else:
         access.is_active = True
+        access.can_record_feeding = data.can_record_feeding
     audit(db, user, 'grant_unit_view', 'farm_staff', farm_id,
-          json.dumps({'unit_id': unit_id, 'user_id': target.id}))
+          json.dumps({'unit_id': unit_id, 'user_id': target.id, 'can_record_feeding': data.can_record_feeding}))
     try:
         db.commit()
     except IntegrityError:
@@ -102,9 +128,28 @@ def assigned_units(user: CurrentUser, db: Db):
     rows = db.execute(select(
         Farm.id.label('farm_id'), Farm.name.label('farm_name'), ProductionUnit.id.label('unit_id'),
         ProductionUnit.name.label('unit_name'), ProductionUnit.unit_type,
+        FarmStaffUnitAccess.can_record_feeding,
     ).join(ProductionUnit, ProductionUnit.farm_id == Farm.id)
      .join(FarmStaffUnitAccess, FarmStaffUnitAccess.unit_id == ProductionUnit.id)
      .where(FarmStaffUnitAccess.user_id == user.id, FarmStaffUnitAccess.is_active.is_(True),
             Farm.archived_at.is_(None), ProductionUnit.is_active.is_(True))
      .order_by(Farm.name, ProductionUnit.name, ProductionUnit.id))
     return [dict(row._mapping) for row in rows]
+
+
+@app.get('/staff/assigned-units/{unit_id}/feeding')
+def assigned_feeding_history(unit_id: int, user: CurrentUser, db: Db, offset: int = Query(0, ge=0)):
+    assignment = select(FarmStaffUnitAccess.unit_id).join(ProductionUnit).join(Farm).where(
+        FarmStaffUnitAccess.user_id == user.id, FarmStaffUnitAccess.unit_id == unit_id,
+        FarmStaffUnitAccess.is_active.is_(True), ProductionUnit.is_active.is_(True), Farm.archived_at.is_(None),
+    )
+    if db.scalar(assignment) is None:
+        raise HTTPException(404, 'Assigned unit not found')
+    rows = db.execute(select(
+        FeedLedger.id, FeedLedger.occurred_on, FeedLedger.session_number, StockingCycle.species,
+        FeedProduct.name.label('feed_name'), (-FeedLedger.quantity_delta_kg).label('quantity_kg'),
+    ).join(StockingCycle, StockingCycle.id == FeedLedger.cycle_id)
+     .join(FeedProduct, FeedProduct.id == FeedLedger.feed_id)
+     .where(StockingCycle.unit_id.in_(assignment), FeedLedger.event_type == 'feeding')
+     .order_by(FeedLedger.occurred_on.desc(), FeedLedger.id.desc()).offset(offset).limit(26)).all()
+    return {'items': [dict(row._mapping) for row in rows[:25]], 'has_more': len(rows) > 25}

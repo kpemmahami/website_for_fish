@@ -261,7 +261,13 @@ async def upload_evidence(
     challenge_id: int | None = None,
     challenge_code: str | None = None,
 ):
-    farm = owned_farm(farm_id, user, db)
+    delegated = False
+    if record_type == 'feeding':
+        from .farm_staff import feeding_write_scope
+
+        farm, delegated = feeding_write_scope(farm_id, unit_id, user, db)
+    else:
+        farm = owned_farm(farm_id, user, db)
     unit = db.scalar(select(ProductionUnit).where(
         ProductionUnit.id == unit_id,
         ProductionUnit.farm_id == farm_id,
@@ -273,7 +279,14 @@ async def upload_evidence(
         raise HTTPException(422, 'Scan or enter the correct physical unit tag')
     cycle = None
     if cycle_id is not None:
-        cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
+        if delegated:
+            cycle = db.scalar(select(StockingCycle).where(
+                StockingCycle.id == cycle_id, StockingCycle.unit_id == unit_id,
+            ))
+            if cycle is None:
+                raise HTTPException(404, 'Stocking cycle not found')
+        else:
+            cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
         if cycle.closed_at is not None:
             raise HTTPException(409, 'Video evidence requires an active stocking cycle')
     elif record_type not in ('stocking', 'feed_delivery', 'feed_stock_count', 'inspection'):
@@ -299,6 +312,7 @@ async def upload_evidence(
         ))
         if (
             challenge is None
+            or (delegated and challenge.issued_by != user.id)
             or as_utc(challenge.expires_at) < now()
             or as_utc(challenge.issued_at) > as_utc(captured_at)
         ):
@@ -415,7 +429,12 @@ async def upload_evidence(
 
 @app.post('/farms/{farm_id}/evidence-challenges', tags=['Evidence verification'])
 def create_activity_challenge(farm_id: int, data: ChallengeIn, user: CurrentUser, db: Db):
-    owned_farm(farm_id, user, db)
+    if data.activity_type == 'feeding':
+        from .farm_staff import feeding_write_scope
+
+        feeding_write_scope(farm_id, data.unit_id, user, db)
+    else:
+        owned_farm(farm_id, user, db)
     unit = db.scalar(select(ProductionUnit).where(
         ProductionUnit.id == data.unit_id,
         ProductionUnit.farm_id == farm_id,

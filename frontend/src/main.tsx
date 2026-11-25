@@ -1532,7 +1532,8 @@ function App(){
   <button className="outline" aria-pressed={page==='expenses'} onClick={()=>setPage('expenses')}>Farm Expenses</button>
  </div>}
  {page==='staff'&&<><FarmStaffAccess key={farmId??'assigned'} farmId={farmId} units={units.map(unit=>({id:unit.id,name:unit.name}))}
-   load={json} grant={(path,email)=>json(path,{email})} revoke={path=>api(path,{method:'DELETE'})}/>
+   load={json} grant={(path,email,canRecordFeeding)=>json(path,{email,can_record_feeding:canRecordFeeding})}
+   revoke={path=>api(path,{method:'DELETE'})}/>
  <section className="panel"><h2>Farm supervisors</h2>
   <p className="muted">Supervisors verify farm evidence.</p>
   {!farmId?<p className="empty">Select a farm.</p>:workspaceError?<ErrorNotice message={workspaceError} retry={()=>setWorkspaceRefresh(value=>value+1)}/>:staffRows===null?<p role="status">Loading supervisors?</p>:staffRows.length?staffRows.map(row=><div className="item" key={row.id}><b>{row.full_name}</b><small>{row.email}</small></div>):<p className="empty">No supervisors assigned to this farm.</p>}

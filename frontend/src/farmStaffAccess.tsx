@@ -7,6 +7,7 @@ interface Assignment {
   unit_id: number;
   unit_name: string;
   is_active: boolean;
+  can_record_feeding: boolean;
 }
 
 interface AssignedUnit {
@@ -15,6 +16,7 @@ interface AssignedUnit {
   unit_id: number;
   unit_name: string;
   unit_type: string;
+  can_record_feeding: boolean;
 }
 
 interface ActivityPage {
@@ -22,21 +24,29 @@ interface ActivityPage {
   has_more: boolean;
 }
 
+interface FeedingPage {
+  items: {id: number; occurred_on: string; session_number: number | null; species: string; feed_name: string; quantity_kg: number}[];
+  has_more: boolean;
+}
+
 export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
   farmId: number | null;
   units: {id: number; name: string}[];
   load: (path: string) => Promise<any>;
-  grant: (path: string, email: string) => Promise<unknown>;
+  grant: (path: string, email: string, canRecordFeeding: boolean) => Promise<unknown>;
   revoke: (path: string) => Promise<unknown>;
 }) {
   const [assigned, setAssigned] = useState<AssignedUnit[]>([]);
   const [granted, setGranted] = useState<Assignment[]>([]);
   const [unit, setUnit] = useState('');
   const [email, setEmail] = useState('');
+  const [canRecordFeeding, setCanRecordFeeding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [activity, setActivity] = useState<ActivityPage|null>(null);
   const [activityOffset, setActivityOffset] = useState(0);
+  const [feeding, setFeeding] = useState<{unitId: number; offset: number; page: FeedingPage}|null>(null);
+  const [feedingBusy, setFeedingBusy] = useState(false);
   const refresh = useCallback(async () => {
     const [mine, access] = await Promise.all([
       load('/staff/assigned-units'),
@@ -60,6 +70,20 @@ export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
     }
   }
 
+  async function loadFeeding(unitId: number, offset: number) {
+    setFeedingBusy(true);
+    setFeeding(null);
+    setError('');
+    try {
+      const page: FeedingPage = await load(`/staff/assigned-units/${unitId}/feeding?offset=${offset}`);
+      setFeeding({unitId, offset, page});
+    } catch (problem) {
+      setError(String(problem));
+    } finally {
+      setFeedingBusy(false);
+    }
+  }
+
   async function save(action: () => Promise<unknown>) {
     setBusy(true);setError('');
     try {
@@ -76,14 +100,30 @@ export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
     {error&&<p role="alert" className="alert">{error}</p>}
     <h3>Units assigned to me</h3>
     {assigned.length===0?<p>No production units assigned.</p>:assigned.map(row=><div className="item" key={row.unit_id}>
-      <b>{row.unit_name}</b><small>{row.farm_name} · {row.unit_type} · Read-only</small>
+      <b>{row.unit_name}</b><small>{row.farm_name} · {row.unit_type} · {row.can_record_feeding?'Feeding access':'Read-only'}</small>
+      <button type="button" className="outline small" disabled={feedingBusy}
+        onClick={()=>void loadFeeding(row.unit_id,0)}>View feeding history</button>
+      {feeding?.unitId===row.unit_id&&<div>
+        <h4>Feeding history</h4>
+        {feeding.page.items.length===0&&<p>No feeding records for this unit.</p>}
+        {feeding.page.items.map(entry=><div className="item" key={entry.id}>
+          <b>{entry.occurred_on} · {entry.quantity_kg} kg</b>
+          <small>{entry.species} · {entry.feed_name} · {entry.session_number==null?'Unscheduled':`Session ${entry.session_number}`}</small>
+        </div>)}
+        <div className="farmactions">
+          <button type="button" className="outline small" disabled={feedingBusy||feeding.offset===0}
+            onClick={()=>void loadFeeding(row.unit_id,feeding.offset-25)}>Previous</button>
+          <button type="button" className="outline small" disabled={feedingBusy||!feeding.page.has_more}
+            onClick={()=>void loadFeeding(row.unit_id,feeding.offset+25)}>Next</button>
+        </div>
+      </div>}
     </div>)}
     {farmId&&<>
       <h3>Manage unit access</h3>
       <form className="farmform" onSubmit={event=>{
         event.preventDefault();
         void save(async()=>{
-          await grant(`/farms/${farmId}/units/${unit}/staff-access`,email);
+          await grant(`/farms/${farmId}/units/${unit}/staff-access`,email,canRecordFeeding);
           setEmail('');
         });
       }}>
@@ -96,10 +136,12 @@ export function FarmStaffAccess({farmId, units, load, grant, revoke}: {
             {units.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}
           </select>
         </label>
-        <button type="submit" className="primary" disabled={busy||units.length===0}>Grant read access</button>
+        <label className="consent"><input type="checkbox" checked={canRecordFeeding}
+          onChange={event=>setCanRecordFeeding(event.target.checked)}/> Allow recording feeding for this unit</label>
+        <button type="submit" className="primary" disabled={busy||units.length===0}>Save unit access</button>
       </form>
       {granted.filter(row=>row.is_active).map(row=><div className="item" key={`${row.unit_id}:${row.user_id}`}>
-        <b>{row.full_name} · {row.unit_name}</b><small>{row.email}</small>
+        <b>{row.full_name} · {row.unit_name}</b><small>{row.email} · {row.can_record_feeding?'Feeding access':'Read-only'}</small>
         <button type="button" className="outline small" disabled={busy} onClick={()=>{
           if(window.confirm(`Revoke ${row.full_name}’s access to ${row.unit_name}?`)){
             void save(()=>revoke(`/farms/${farmId}/units/${row.unit_id}/staff-access/${row.user_id}`));

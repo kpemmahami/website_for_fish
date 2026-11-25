@@ -464,9 +464,27 @@ def record_feeding(
     evidence_id: int = Query(gt=0),
 ):
     from .feeding_sessions import GHANA, freeze_plan, lock_cycle, daily_summary, validate_session
+    from .farm_staff import feeding_write_scope
+    from .main import AuditLog
 
-    cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
-    feed_for_farm(farm_id, data.feed_id, user, db)
+    _, delegated = feeding_write_scope(farm_id, unit_id, user, db)
+    if delegated:
+        cycle = db.scalar(select(StockingCycle).where(StockingCycle.id == cycle_id, StockingCycle.unit_id == unit_id))
+        if cycle is None:
+            raise HTTPException(404, 'Stocking cycle not found')
+        if db.scalar(select(FeedProduct.id).where(
+            FeedProduct.id == data.feed_id, FeedProduct.farm_id == farm_id,
+        )) is None:
+            raise HTTPException(404, 'Feed product not found')
+        uploaded = db.scalar(select(AuditLog.id).where(
+            AuditLog.actor_id == user.id, AuditLog.entity_type == 'record_evidence',
+            AuditLog.entity_id == evidence_id, AuditLog.action == 'create',
+        ).limit(1))
+        if uploaded is None:
+            raise HTTPException(422, 'Upload your own feeding video before recording this entry')
+    else:
+        cycle = owned_cycle(farm_id, unit_id, cycle_id, user, db)
+        feed_for_farm(farm_id, data.feed_id, user, db)
     lock_cycle(db, cycle)
     previous = db.scalar(select(FeedLedger).where(
         FeedLedger.cycle_id == cycle_id, FeedLedger.event_type == 'feeding',
@@ -506,6 +524,8 @@ def record_feeding(
     db.execute(update(FeedProduct).where(FeedProduct.id == data.feed_id).values(farm_id=FeedProduct.farm_id))
     available = stock(data.feed_id, db)
     if available + 1e-8 < data.quantity_kg:
+        if delegated:
+            raise HTTPException(409, 'Insufficient feed stock. Ask the farm owner to review inventory.')
         raise HTTPException(409, f'Insufficient feed stock. Only {max(0, available):.4f} kg is available.')
     entry = FeedLedger(feed_id=data.feed_id, event_type='feeding', quantity_delta_kg=-data.quantity_kg,
                        cycle_id=cycle_id, occurred_on=data.fed_on, notes=data.notes,

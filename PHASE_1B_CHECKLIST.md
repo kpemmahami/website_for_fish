@@ -151,6 +151,12 @@ The remaining account security work includes privileged and lost-phone recovery,
 
 Revision `0038_farm_staff_scope` adds owner-managed production-unit assignments. In **Staff Management**, the owner selects a unit and enters the email of an existing approved farmer account. The recipient can view its basic details under **Units assigned to me**, without owning a farm. Revoking an assignment removes visibility on the next request and records an audit event. Delegated operational actions and dedicated staff onboarding remain pending.
 
+Assigned users can open **View feeding history** for their assigned units. This lists feeding dates, sessions, species, feed names and quantities. Feed costs, stock balances, and other units are outside this permission. Revocation also blocks the feeding history endpoint.
+
+Revision `0039_staff_feeding_access` adds an opt-in feeding permission to each assignment. Staff with it can request the feeding evidence challenge, upload their own video, and record feeding using the existing API validation. The same unit, cycle, feed, stock, and evidence checks apply, and the ledger records the actual staff user. Other operations remain owner-scoped. The staff recording screen and dedicated staff onboarding are still pending.
+
+Flutter work has resumed. The farmer app now uses the production HTTPS backend by default and supports requesting a recovery email, verifying a saved phone, and viewing assigned units. Recovery links open in the web browser. Android builds still need a physical-device check, including real SMS and recovery email delivery.
+
 New farmer and processor signup requires a phone number. The web form and Flutter source send it, so release a compatible Flutter build alongside the backend if users register through the mobile app. Existing accounts keep email sign-in. Ghanaian local, country-code, and international input are normalized by the same service as phone sign-in. This change validates formatting. Ownership verification and conflict handling have separate rollout steps.
 
 Revision `0034_phone_claims` adds a nullable phone claim and a unique index. Apply it before rolling out the backend. Existing numbers stay in place, including shared numbers. New assignments check existing phone records and reserve the normalized number in the same transaction. The unique index rejects simultaneous claims for the same number.
