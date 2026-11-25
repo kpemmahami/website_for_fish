@@ -17,6 +17,11 @@ interface DirectoryPage {
   items: Administrator[];
 }
 
+interface ActivityPage {
+  items: {id: number; actor_name: string; action: string; reason: string | null; created_at: string}[];
+  has_more: boolean;
+}
+
 const pageSize = 25;
 
 type AccessAction = 'suspend' | 'reactivate' | 'revoke_sessions';
@@ -29,8 +34,9 @@ interface AdministratorDetails {
 
 const emptyDetails: AdministratorDetails = {full_name: '', email: '', phone_number: ''};
 
-export function AdministratorDirectory({load, changeAccess, prepare, sendVerification}: {
+export function AdministratorDirectory({load, loadActivity, changeAccess, prepare, sendVerification}: {
   load: (path: string) => Promise<DirectoryPage>;
+  loadActivity: (id: number, offset: number) => Promise<ActivityPage>;
   changeAccess: (id: number, action: AccessAction, reason: string) => Promise<unknown>;
   prepare: (details: AdministratorDetails) => Promise<unknown>;
   sendVerification: (id: number) => Promise<unknown>;
@@ -44,6 +50,27 @@ export function AdministratorDirectory({load, changeAccess, prepare, sendVerific
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [details, setDetails] = useState(emptyDetails);
+  const [activityTarget, setActivityTarget] = useState<Administrator|null>(null);
+  const [activityOffset, setActivityOffset] = useState(0);
+  const [activity, setActivity] = useState<ActivityPage|null>(null);
+  const [activityError, setActivityError] = useState('');
+
+  useEffect(()=>{
+    if (!activityTarget) return;
+    let active = true;
+    loadActivity(activityTarget.id, activityOffset)
+      .then(page=>{if(active)setActivity(page)})
+      .catch(problem=>{if(active)setActivityError(String(problem))});
+    return ()=>{active=false};
+  }, [activityTarget, activityOffset, loadActivity, revision]);
+
+  function showActivity(row: Administrator, offset = 0) {
+    if(activityTarget?.id===row.id&&activityOffset===offset)return;
+    setActivity(null);
+    setActivityError('');
+    setActivityTarget(row);
+    setActivityOffset(offset);
+  }
 
   useEffect(() => {
     let active = true;
@@ -142,7 +169,8 @@ export function AdministratorDirectory({load, changeAccess, prepare, sendVerific
             <td>{row.phone_number ?? '—'}</td><td>{new Date(row.created_at).toLocaleDateString()}</td>
             <td>{row.pending_activation ? (row.contacts_verified_at ? 'Contacts verified · Pending MFA' : 'Pending contact verification')
               : row.is_suspended ? 'Suspended' : 'Active'}</td>
-            <td>{row.pending_activation&&<button type="button" className="outline small" disabled={busy}
+            <td><button type="button" className="outline small" onClick={()=>showActivity(row)}>View activity</button>
+            {row.pending_activation&&<button type="button" className="outline small" disabled={busy}
               onClick={async () => {
                 if (!window.confirm(`Send an email link and SMS code to ${row.full_name}?`)) return;
                 setBusy(true);setError('');setNotice('');
@@ -170,5 +198,24 @@ export function AdministratorDirectory({load, changeAccess, prepare, sendVerific
           <button type="button" className="outline" disabled={offset + pageSize >= result.total} onClick={() => goTo(offset + pageSize)}>Next</button>
         </div>
       </>}
+      {activityTarget&&<section>
+        <div className="between"><h3>Account activity for {activityTarget.full_name}</h3>
+          <button type="button" className="outline small" onClick={()=>setActivityTarget(null)}>Close activity</button>
+        </div>
+        {activityError&&<p role="alert">{activityError}</p>}
+        {!activity&&!activityError&&<p role="status">Loading account activity…</p>}
+        {activity?.items.length===0&&<p>No account activity recorded.</p>}
+        {activity?.items.map(event=><div className="item" key={event.id}>
+          <b>{event.action.replace(/_/g,' ')}</b>
+          <small>{event.actor_name} · {new Date(event.created_at).toLocaleString()}</small>
+          {event.reason&&<small>{event.reason}</small>}
+        </div>)}
+        <div className="farmactions">
+          <button type="button" className="outline" disabled={activityOffset===0}
+            onClick={()=>showActivity(activityTarget,activityOffset-25)}>Previous</button>
+          <button type="button" className="outline" disabled={!activity?.has_more}
+            onClick={()=>showActivity(activityTarget,activityOffset+25)}>Next</button>
+        </div>
+      </section>}
   </section>;
 }

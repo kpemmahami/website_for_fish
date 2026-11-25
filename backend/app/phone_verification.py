@@ -217,23 +217,23 @@ def confirm_phone_replacement(data: PhoneReplacementConfirm, user: Authenticated
     return {'message': 'Phone number changed. Sign in again with the new number or your email.'}
 
 
-def send_institution_setup_code(db: Db, account: User):
+def send_institution_phone_code(db: Db, account: User, token: str):
     phone = account.phone_number
     if not phone:
         raise HTTPException(409, 'A mobile number is required for institution password setup')
     code = f'{secrets.randbelow(1_000_000):06d}'
-    save_challenge(db, account, phone, code, purpose='institution-phone-setup')
+    save_challenge(db, account, phone, code, purpose=f'institution-phone:{token}')
     send_code(phone, code, 'institution account verification')
     return {'destination': f'•••{phone[-4:]}'}
 
 
-def verify_institution_setup_code(db: Db, account: User, code: str) -> None:
+def verify_institution_phone_code(db: Db, account: User, code: str, token: str) -> None:
     challenge = db.get(AccountPhoneChallenge, account.id)
     invalid = HTTPException(400, 'Invalid or expired institution verification code')
     if (
         challenge is None or challenge.previous_phone is not None or challenge.phone_number != account.phone_number
         or not challenge.password_proof
-        or not hmac.compare_digest(challenge.password_proof, password_binding(account, 'institution-phone-setup'))
+        or not hmac.compare_digest(challenge.password_proof, password_binding(account, f'institution-phone:{token}'))
     ):
         raise invalid
     valid = hmac.compare_digest(challenge.code_digest, code_digest(

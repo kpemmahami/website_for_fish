@@ -348,6 +348,7 @@ function App(){
  const [needsAuthenticator,setNeedsAuthenticator]=useState(false);
  const [useRecoveryCode,setUseRecoveryCode]=useState(false);
  const [initialPasswordToken,setInitialPasswordToken]=useState('');
+ const [institutionMfaToken,setInstitutionMfaToken]=useState('');
  const [institutionSetupDestination,setInstitutionSetupDestination]=useState('');
  useEffect(()=>{
    if(administratorContactToken)window.history.replaceState(null,'',window.location.pathname+window.location.search);
@@ -1007,6 +1008,13 @@ function App(){
          setForm({email:identifier});
          return;
        }
+       if(portal==='institution'&&result.institution_mfa_token){
+         setInstitutionMfaToken(result.institution_mfa_token);
+         setInstitutionSetupDestination('');
+         setShowLoginPassword(false);
+         setForm({email:identifier});
+         return;
+       }
        sessionStorage.setItem('aquafarm_token',result.access_token);
        setPage(portal==='admin'?'admin':portal==='institution'?'lender':'overview');
        setForm({});setToken(result.access_token);
@@ -1289,16 +1297,17 @@ function App(){
   {kind:'financial',label:'Financial analysis',description:'Recorded costs, cost per kg and recommended prices',csv:'analytics/financial.csv'},
   {kind:'bank-ready',label:'Investment-ready report',description:'Production, sales, costs, receivables and evidence caveats',csv:'bank-ready.csv'},
  ];
- if(initialPasswordToken)return <div className="authwrap"><div className="authcard">
-   <h1>Set your institution password</h1>
+ if(initialPasswordToken||institutionMfaToken)return <div className="authwrap"><div className="authcard">
+   <h1>{initialPasswordToken?'Set your institution password':'Verify institution sign-in'}</h1>
    <p>{institutionSetupDestination
-     ? `Enter the SMS code sent to ${institutionSetupDestination} and choose a new private password.`
-     : 'Verify the phone number saved on your account before choosing a private password.'}</p>
+     ? `Enter the SMS code sent to ${institutionSetupDestination}.`
+     : 'Request a code at the mobile number saved on your account.'}</p>
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
    <button type="button" className="outline" disabled={busy} onClick={async()=>{
      setBusy(true);setError('');
      try{
-       const result=await json('/auth/institution/initial-password/verification',{token:initialPasswordToken});
+       const path=initialPasswordToken?'/auth/institution/initial-password/verification':'/auth/institution/mfa/request';
+       const result=await json(path,{token:initialPasswordToken||institutionMfaToken});
        setInstitutionSetupDestination(result.destination);
        setForm({...form,institution_setup_code:''});
      }catch(problem){setError(String(problem))}
@@ -1306,25 +1315,30 @@ function App(){
    }}>{institutionSetupDestination?'Resend SMS code':'Send SMS code'}</button>
    {institutionSetupDestination&&<form onSubmit={async event=>{
      event.preventDefault();setError('');
-     if(form.password!==form.confirm_password){setError('The passwords do not match.');return}
+     if(initialPasswordToken&&form.password!==form.confirm_password){setError('The passwords do not match.');return}
      setBusy(true);
      try{
-       const result=await json('/auth/institution/initial-password',{
-         token:initialPasswordToken,password:form.password,code:form.institution_setup_code,
+       const path=initialPasswordToken?'/auth/institution/initial-password':'/auth/institution/mfa/confirm';
+       const result=await json(path,{
+         token:initialPasswordToken||institutionMfaToken,code:form.institution_setup_code,
+         ...(initialPasswordToken?{password:form.password}:{}),
        });
-       setInitialPasswordToken('');setForm({email:form.email});setNotice(result.message);
+       sessionStorage.setItem('aquafarm_token',result.access_token);
+       setInitialPasswordToken('');setInstitutionMfaToken('');setForm({});setNotice('');setPage('lender');setToken(result.access_token);
      }catch(problem){setError(String(problem))}
      finally{setBusy(false)}
    }}>
      {field('institution_setup_code','SMS verification code','text',{
        required:true,pattern:'[0-9]{6}',maxLength:6,inputMode:'numeric',autoComplete:'one-time-code',
      })}
-     {field('password','New password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
-     {field('confirm_password','Confirm new password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
-     <button className="primary" disabled={busy}>Set password</button>
+     {initialPasswordToken&&<>
+       {field('password','New password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
+       {field('confirm_password','Confirm new password','password',{required:true,minLength:12,maxLength:128,autoComplete:'new-password'})}
+     </>}
+     <button className="primary" disabled={busy}>{initialPasswordToken?'Set password':'Verify and sign in'}</button>
    </form>}
    <button className="textbutton" type="button" disabled={busy} onClick={()=>{
-     setInitialPasswordToken('');setForm({email:form.email});setError('');
+     setInitialPasswordToken('');setInstitutionMfaToken('');setForm({email:form.email});setError('');
    }}>Back to sign in</button>
  </div></div>;
  if(adminEnrollment)return <div className="authwrap"><div className="authcard">
@@ -1460,6 +1474,7 @@ function App(){
    }}
    confirm={async code=>{
      const result=await json('/auth/me/phone-verification/confirm',{code});
+     if(user.account_type==='institution'){logout();return}
      setUser(current=>current?{...current,phone_verified_at:result.phone_verified_at}:null);
    }}/>
    {!user.is_platform_admin&&user.phone_verified_at&&<PhoneReplacement
@@ -2083,6 +2098,7 @@ function App(){
  </section>
  <FarmerApprovals load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>
  {user.is_platform_owner&&<AdministratorDirectory load={json}
+   loadActivity={(id,offset)=>json(`/admin/administrators/${id}/activity?offset=${offset}`)}
    prepare={details=>json('/admin/administrators',details)}
    sendVerification={id=>json(`/admin/administrators/${id}/contact-verification`,{})}
    changeAccess={(id,action,reason)=>json(`/admin/administrators/${id}/access`,{action,reason})}/>}

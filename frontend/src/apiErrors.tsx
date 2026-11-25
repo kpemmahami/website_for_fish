@@ -120,6 +120,10 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
   return 'Registration is temporarily unavailable. Please try again.';
  }
  const login=/^\/auth\/(?:[^/]+\/)?login$/.test(path);
+ if(path.startsWith('/auth/institution/mfa/')){
+   if(status===400)return 'The SMS code or sign-in request is invalid or expired.';
+   if(status===503)return 'The sign-in SMS could not be sent. Try again later.';
+ }
  if(path==='/auth/admin/authenticator-enrollment'&&status===403&&detail==='The current password is incorrect')return 'The current password is incorrect.';
  if(path==='/auth/admin/authenticator-enrollment'&&status===503)return 'Setup delivery is unavailable. Contact your platform operator.';
  if(path==='/auth/me/phone-verification/confirm'&&status===400)return 'The SMS code is invalid or expired.';

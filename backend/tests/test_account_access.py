@@ -71,7 +71,10 @@ def register_institution(email, institution):
 
 
 def complete_initial_password(email, initial_password):
+    from datetime import timedelta
     from unittest.mock import patch
+
+    from app.phone_verification import AccountPhoneChallenge
 
     path = '/auth/institution/login'
     credentials_in = {'email': email, 'password': initial_password}
@@ -103,7 +106,25 @@ def complete_initial_password(email, initial_password):
     assert client.post(path, json=credentials_in).status_code == 401
     login_response = client.post(path, json={**credentials_in, 'password': password})
     assert login_response.status_code == 200, login_response.text
-    headers = {'Authorization': f"Bearer {login_response.json()['access_token']}"}
+    login_challenge = login_response.json()
+    assert 'access_token' not in login_challenge
+    mfa_token = login_challenge['institution_mfa_token']
+    assert client.get('/finance/institutions/mine',
+                      headers={'Authorization': f'Bearer {mfa_token}'}).status_code == 401
+    with SessionLocal.begin() as db:
+        challenge = db.scalar(select(AccountPhoneChallenge).join(User).where(User.email == email))
+        challenge.sent_at -= timedelta(minutes=3)
+    with patch('app.phone_verification.hubtel_send_sms') as send_sms:
+        assert client.post('/auth/institution/mfa/request', json={'token': token}).status_code == 400
+        assert client.post('/auth/institution/mfa/request', json={'token': mfa_token}).status_code == 200
+        code = send_sms.call_args.args[1].split(': ')[1].split('.')[0]
+    confirm_path = '/auth/institution/mfa/confirm'
+    wrong = '000000' if code != '000000' else '999999'
+    assert client.post(confirm_path, json={'token': mfa_token, 'code': wrong}).status_code == 400
+    confirmed = client.post(confirm_path, json={'token': mfa_token, 'code': code})
+    assert confirmed.status_code == 200
+    assert client.post(confirm_path, json={'token': mfa_token, 'code': code}).status_code == 400
+    headers = {'Authorization': f"Bearer {confirmed.json()['access_token']}"}
     assert client.get('/auth/me', headers=headers).json()['phone_verified_at']
     return headers
 
@@ -368,6 +389,12 @@ def test_owner_controls_administrator_access_and_invalidates_sessions():
     assert client.post(path, headers=owner, json={**suspend, 'action': 'reactivate'}).status_code == 200
     assert client.get('/auth/me', headers=before_suspension).status_code == 401
     assert client.get('/auth/me', headers=login('admin', email)).status_code == 200
+    activity_path = f'/admin/administrators/{account_id}/activity'
+    assert client.get(activity_path, headers=login('admin', email)).status_code == 403
+    activity = client.get(activity_path, headers=owner).json()
+    assert [event['action'] for event in activity['items']] == ['reactivate', 'suspend', 'revoke_sessions']
+    assert all(event['reason'] == 'Access review' for event in activity['items'])
+    assert client.get(activity_path, headers=owner, params={'offset': 3}).json()['items'] == []
     with SessionLocal() as db:
         logs = db.scalars(select(AuditLog).where(
             AuditLog.entity_type == 'platform_admin', AuditLog.entity_id == account_id,

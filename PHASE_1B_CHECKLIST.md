@@ -133,8 +133,10 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Direct institution staff creation and role enforcement | Newly implemented and locally verified |
 | Mandatory initial-password replacement for new institution administrators and staff | Newly implemented and locally verified |
 | Required SMS contact verification during institution onboarding | Newly implemented and locally verified |
-| Ongoing MFA for institution accounts | Not implemented |
+| Ongoing SMS MFA for institution accounts with verified numbers | Newly implemented and locally verified |
+| MFA rollout to institution accounts without verified numbers | Not implemented |
 | Audit history and session revocation | Partially implemented |
+| Owner-only administrator activity history | Newly implemented and locally verified |
 | Phase 1B mobile responsiveness | Partially implemented |
 | Hosted verification of the Super Admin hotfix | Verified on the hosted website |
 
@@ -144,7 +146,7 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 
 Keep the remaining web and backend work on the development branch. When the batch is ready, test the full Alembic upgrade from the production revision on an isolated PostgreSQL database, then apply the reviewed chain in one production upgrade and deploy once. Keep Flutter release work separate.
 
-The remaining account security work includes privileged and lost-phone recovery, mandatory existing-administrator MFA rollout and lost-authenticator replacement, ongoing institution MFA, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
+The remaining account security work includes privileged and lost-phone recovery, mandatory existing-administrator MFA rollout and lost-authenticator replacement, enrollment for institution accounts without verified numbers, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
 
 New farmer and processor signup requires a phone number. The web form and Flutter source send it, so release a compatible Flutter build alongside the backend if users register through the mobile app. Existing accounts keep email sign-in. Ghanaian local, country-code, and international input are normalized by the same service as phone sign-in. This change validates formatting. Ownership verification and conflict handling have separate rollout steps.
 
@@ -167,7 +169,7 @@ Revision `0035_initial_password` adds an initial-password requirement that defau
 
 Revision `0036_phone_verification` adds a timestamp and a short-lived challenge table. Pending farmers can verify their saved number from the approval screen. Signed-in farmers use **Settings**. Administrators and institution users use their dashboard. Codes expire after five minutes, allow five attempts, and can be resent after two minutes. Accounts with an unverified number can still use existing email sign-in and the existing profile form. The rollout does not yet require verification for signup approval.
 
-New institution administrators and staff must also use **Send SMS code** on the first-sign-in screen. They enter that code and choose a private password in the same step. Successful setup records the phone as verified. Existing users who already finished setup keep their current sign-in flow. Configure Hubtel before deploying the batch so new institution accounts can complete setup.
+New institution administrators and staff must also use **Send SMS code** on the first-sign-in screen. They enter that code and choose a private password in the same step. Successful setup records the phone as verified and opens the workspace. On later sign-ins, institution accounts with verified numbers must confirm a fresh SMS code before receiving a workspace session. This also applies to existing institution users when they verify a number. Older sessions without MFA proof require a new sign-in. Configure Hubtel before deploying this policy.
 
 Farmer and institution users who have verified their number can use **Change verified mobile number**. The user supplies their current password and confirms separate codes received on the current and new phones. Only then is the new verified number saved and old sessions revoked. A direct profile update cannot replace a verified number. Privileged phone changes and recovery when the old phone is unavailable remain separate work.
 

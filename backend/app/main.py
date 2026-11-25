@@ -141,6 +141,10 @@ class InitialPasswordChallenge(BaseModel):
     initial_password_token: str
 
 
+class InstitutionMfaChallenge(BaseModel):
+    institution_mfa_token: str
+
+
 class InitialPasswordProof(BaseModel):
     model_config = ConfigDict(extra='forbid')
     token: str = Field(min_length=1, max_length=2048)
@@ -152,6 +156,7 @@ class InitialPasswordChange(InitialPasswordProof):
 
 
 INITIAL_PASSWORD_PURPOSE = 'institution_initial_password'
+INSTITUTION_MFA_PURPOSE = 'institution_sign_in_mfa'
 
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -270,6 +275,8 @@ def authenticated_user(credentials: Annotated[HTTPAuthorizationCredentials, Depe
         raise HTTPException(status_code=401, detail='User no longer exists')
     if user.is_suspended or user.initial_password_required:
         raise HTTPException(status_code=401, detail='Invalid or expired token')
+    if user.account_type == 'institution' and user.phone_verified_at is not None and payload.get('institution_mfa') is not True:
+        raise HTTPException(status_code=401, detail='Institution sign-in verification is required')
     binding = payload.get('binding')
     if (
         (binding is None and (user.password_reset_at is not None or user.session_generation is not None))
@@ -352,6 +359,7 @@ async def safe_registration_validation(request: Request, error: RequestValidatio
         FARMER_REGISTRATION_PATHS | {
             '/auth/institution/initial-password', '/auth/me/phone-verification/confirm',
             '/auth/institution/initial-password/verification',
+            '/auth/institution/mfa/request', '/auth/institution/mfa/confirm',
             '/auth/admin/authenticator-enrollment',
             '/auth/admin/login', '/auth/admin/recovery-codes',
             '/auth/me/phone-replacement/request', '/auth/me/phone-replacement/confirm',
@@ -414,7 +422,24 @@ def register(data: FarmerRegister, db: Db):
     return response
 
 
-def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token | InitialPasswordChallenge:
+def issue_access_token(user: User, *, institution_mfa: bool = False) -> Token:
+    token = jwt.encode({
+        'sub': str(user.id), 'purpose': 'access', 'binding': password_binding(user, 'access'),
+        'institution_mfa': institution_mfa,
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES),
+    }, SECRET_KEY, algorithm='HS256')
+    return Token(access_token=token)
+
+
+def institution_challenge(user: User, purpose: str) -> str:
+    return jwt.encode({
+        'sub': str(user.id), 'purpose': purpose, 'jti': uuid.uuid4().hex,
+        'binding': password_binding(user, purpose),
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=10),
+    }, SECRET_KEY, algorithm='HS256')
+
+
+def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> Token | InitialPasswordChallenge | InstitutionMfaChallenge:
     from .development import DEVELOPMENT_ACCOUNTS, enabled, seeded_account
 
     identifier = data.email.lower()
@@ -436,16 +461,10 @@ def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> T
     if user is None or user.is_suspended or user.account_type not in account_types or not password_hash.verify(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail='Invalid credentials')
     if user.account_type == 'institution' and user.initial_password_required:
-        token = jwt.encode({
-            'sub': str(user.id), 'purpose': INITIAL_PASSWORD_PURPOSE,
-            'binding': password_binding(user, INITIAL_PASSWORD_PURPOSE),
-            'exp': datetime.now(timezone.utc) + timedelta(minutes=10),
-        }, SECRET_KEY, algorithm='HS256')
-        return InitialPasswordChallenge(initial_password_token=token)
-    token = jwt.encode({
-        'sub': str(user.id), 'purpose': 'access', 'binding': password_binding(user, 'access'),
-        'exp': datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES),
-    }, SECRET_KEY, algorithm='HS256')
+        return InitialPasswordChallenge(initial_password_token=institution_challenge(user, INITIAL_PASSWORD_PURPOSE))
+    if user.account_type == 'institution' and user.phone_verified_at is not None:
+        return InstitutionMfaChallenge(institution_mfa_token=institution_challenge(user, INSTITUTION_MFA_PURPOSE))
+    token = issue_access_token(user)
     if user.is_platform_admin:
         from .administrator_verification import check_administrator_authenticator, use_administrator_recovery_code
 
@@ -455,7 +474,7 @@ def login_account(data: Login, db: Session, account_types: tuple[str, ...]) -> T
             use_administrator_recovery_code(db, user, data.recovery_code)
         else:
             check_administrator_authenticator(db, user, data.authenticator_code)
-    return Token(access_token=token)
+    return token
 
 
 @app.post('/auth/login', response_model=Token)
@@ -464,46 +483,82 @@ def login(data: Login, db: Db):
     return login_account(data, db, ('farmer', 'legacy', 'pending_farmer'))
 
 
-@app.post('/auth/institution/login', response_model=Token | InitialPasswordChallenge)
+@app.post('/auth/institution/login', response_model=Token | InitialPasswordChallenge | InstitutionMfaChallenge)
 def institution_login(data: Login, db: Db):
     return login_account(data, db, ('institution', 'legacy'))
 
 
-def initial_password_account(token: str, db: Session) -> User:
-    invalid = HTTPException(400, 'This password setup session is invalid or expired')
+def institution_challenge_account(token: str, db: Session, purpose: str) -> User:
+    invalid = HTTPException(400, 'This institution challenge is invalid or expired')
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'],
                              options={'require': ['exp', 'sub', 'purpose', 'binding']})
         account_id = int(payload['sub'])
-        if payload['purpose'] != INITIAL_PASSWORD_PURPOSE or not isinstance(payload['binding'], str):
+        if payload['purpose'] != purpose or not isinstance(payload['binding'], str):
             raise invalid
     except (InvalidTokenError, TypeError, ValueError):
         raise invalid from None
     user = db.scalar(select(User).where(User.id == account_id).with_for_update())
     if (
         user is None or user.is_suspended or user.account_type != 'institution'
-        or not user.initial_password_required
-        or not hmac.compare_digest(payload['binding'], password_binding(user, INITIAL_PASSWORD_PURPOSE))
+        or not hmac.compare_digest(payload['binding'], password_binding(user, purpose))
     ):
         raise invalid
     return user
 
 
+def initial_password_account(token: str, db: Session) -> User:
+    user = institution_challenge_account(token, db, INITIAL_PASSWORD_PURPOSE)
+    if not user.initial_password_required:
+        raise HTTPException(400, 'This password setup session is invalid or expired')
+    return user
+
+
+def institution_mfa_account(token: str, db: Session) -> User:
+    user = institution_challenge_account(token, db, INSTITUTION_MFA_PURPOSE)
+    if user.initial_password_required or user.phone_verified_at is None:
+        raise HTTPException(400, 'This institution challenge is invalid or expired')
+    return user
+
+
+class InstitutionMfaConfirm(InitialPasswordProof):
+    code: str = Field(pattern=r'^[0-9]{6}$')
+
+
+@app.post('/auth/institution/mfa/request')
+def send_institution_mfa(data: InitialPasswordProof, db: Db):
+    from .phone_verification import send_institution_phone_code
+
+    return send_institution_phone_code(db, institution_mfa_account(data.token, db), data.token)
+
+
+@app.post('/auth/institution/mfa/confirm', response_model=Token)
+def confirm_institution_mfa(data: InstitutionMfaConfirm, db: Db):
+    from .phone_verification import verify_institution_phone_code
+
+    user = institution_mfa_account(data.token, db)
+    verify_institution_phone_code(db, user, data.code, data.token)
+    session = issue_access_token(user, institution_mfa=True)
+    audit(db, user, 'institution_mfa_sign_in', 'user', user.id)
+    db.commit()
+    return session
+
+
 @app.post('/auth/institution/initial-password/verification')
 def send_initial_password_verification(data: InitialPasswordProof, db: Db):
-    from .phone_verification import send_institution_setup_code
+    from .phone_verification import send_institution_phone_code
 
-    return send_institution_setup_code(db, initial_password_account(data.token, db))
+    return send_institution_phone_code(db, initial_password_account(data.token, db), data.token)
 
 
-@app.post('/auth/institution/initial-password')
+@app.post('/auth/institution/initial-password', response_model=Token)
 def replace_initial_password(data: InitialPasswordChange, db: Db):
-    from .phone_verification import verify_institution_setup_code
+    from .phone_verification import verify_institution_phone_code
 
     user = initial_password_account(data.token, db)
     if password_hash.verify(data.password, user.password_hash):
         raise HTTPException(422, 'Choose a password different from the initial password')
-    verify_institution_setup_code(db, user, data.code)
+    verify_institution_phone_code(db, user, data.code, data.token)
     now = datetime.now(timezone.utc)
     changed = db.execute(update(User).where(
         User.id == user.id,
@@ -522,8 +577,10 @@ def replace_initial_password(data: InitialPasswordChange, db: Db):
     if changed.rowcount != 1:
         raise HTTPException(400, 'This password setup session is invalid or expired')
     audit(db, user, 'replace_initial_password', 'user', user.id)
+    db.refresh(user)
+    session = issue_access_token(user, institution_mfa=True)
     db.commit()
-    return {'message': 'Password updated. Sign in with your new password.'}
+    return session
 
 
 @app.post('/auth/admin/login', response_model=Token)

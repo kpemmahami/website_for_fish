@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import (
-    AdminRegister, Base, CurrentUser, Db, User, app, assign_phone_number, audit,
+    AdminRegister, AuditLog, Base, CurrentUser, Db, User, app, assign_phone_number, audit,
     duplicate_phone_claim, new_user, require_platform_admin,
 )
 from .phone_numbers import PhoneNumber, normalize_phone_number
@@ -126,6 +126,30 @@ class PendingAdministratorIn(BaseModel):
     full_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
     email: EmailStr
     phone_number: PhoneNumber
+
+
+@app.get('/admin/administrators/{administrator_id}/activity', tags=['Platform administration'])
+def administrator_activity(administrator_id: int, user: CurrentUser, db: Db, offset: int = Query(0, ge=0)):
+    require_platform_owner(user, db)
+    account = db.get(User, administrator_id)
+    if account is None or account.account_type not in ('admin', 'pending_admin'):
+        raise HTTPException(404, 'Administrator not found')
+    rows = db.execute(select(AuditLog, User.full_name).join(User, User.id == AuditLog.actor_id).where(
+        AuditLog.entity_type == 'platform_admin', AuditLog.entity_id == administrator_id,
+    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset(offset).limit(26)).all()
+    items = []
+    for event, actor_name in rows[:25]:
+        reason = None
+        if event.action in ('suspend', 'reactivate', 'revoke_sessions'):
+            try:
+                details = json.loads(event.details)
+            except (ValueError, TypeError):
+                details = None
+            if isinstance(details, dict) and isinstance(details.get('reason'), str):
+                reason = details['reason']
+        items.append({'id': event.id, 'actor_name': actor_name, 'action': event.action,
+                      'reason': reason, 'created_at': event.created_at})
+    return {'items': items, 'has_more': len(rows) > 25}
 
 
 @app.post('/admin/administrators', status_code=201, tags=['Platform administration'])
