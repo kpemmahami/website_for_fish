@@ -728,6 +728,7 @@ from . import administration
 from . import password_recovery
 from . import administrator_verification
 from . import phone_verification
+from . import farm_staff
 
 from . import institution_staff
 

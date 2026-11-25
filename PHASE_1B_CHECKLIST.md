@@ -130,6 +130,7 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Real recovery email delivery | Blocked by external configuration |
 | Authentication SMS integration with Hubtel | Implemented but requires manual testing |
 | Farm staff creation, permissions, farm and unit assignments | Partially implemented |
+| Read-only access to designated production units | Newly implemented and locally verified |
 | Direct institution staff creation and role enforcement | Newly implemented and locally verified |
 | Mandatory initial-password replacement for new institution administrators and staff | Newly implemented and locally verified |
 | Required SMS contact verification during institution onboarding | Newly implemented and locally verified |
@@ -147,6 +148,8 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 Keep the remaining web and backend work on the development branch. When the batch is ready, test the full Alembic upgrade from the production revision on an isolated PostgreSQL database, then apply the reviewed chain in one production upgrade and deploy once. Keep Flutter release work separate.
 
 The remaining account security work includes privileged and lost-phone recovery, mandatory existing-administrator MFA rollout and lost-authenticator replacement, enrollment for institution accounts without verified numbers, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
+
+Revision `0038_farm_staff_scope` adds owner-managed production-unit assignments. In **Staff Management**, the owner selects a unit and enters the email of an existing approved farmer account. The recipient can view its basic details under **Units assigned to me**, without owning a farm. Revoking an assignment removes visibility on the next request and records an audit event. Delegated operational actions and dedicated staff onboarding remain pending.
 
 New farmer and processor signup requires a phone number. The web form and Flutter source send it, so release a compatible Flutter build alongside the backend if users register through the mobile app. Existing accounts keep email sign-in. Ghanaian local, country-code, and international input are normalized by the same service as phone sign-in. This change validates formatting. Ownership verification and conflict handling have separate rollout steps.
 

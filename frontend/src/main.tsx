@@ -14,6 +14,7 @@ import {InstitutionStaff} from './institutionStaff';
 import {AdministratorDirectory} from './administratorDirectory';
 import {AdministratorAuthenticator} from './administratorAuthenticator';
 import {FarmerApprovals} from './farmerApprovals';
+import {FarmStaffAccess} from './farmStaffAccess';
 import {PhoneReplacement, PhoneVerification} from './phoneVerification';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
@@ -1266,7 +1267,7 @@ function App(){
    if(!user)return false;
    if(user.is_platform_admin)return key==='admin';
    if(key==='admin')return false;
-   if(processorOnly&&['farms','production','inventory','finance','staff'].includes(key))return false;
+   if(processorOnly&&['farms','production','inventory','finance'].includes(key))return false;
    if(key==='lender')return user.account_type==='institution'||user.account_type==='legacy'||mine.length>0;
    return user.account_type!=='institution';
  });
@@ -1524,10 +1525,12 @@ function App(){
   <button className="outline" aria-pressed={page==='reports'} onClick={()=>openReport(null)}>Reports &amp; Analytics</button>
   <button className="outline" aria-pressed={page==='expenses'} onClick={()=>setPage('expenses')}>Farm Expenses</button>
  </div>}
- {page==='staff'&&<section className="panel"><h2>Farm supervisors</h2>
-  <p className="muted">Supervisors verify farm evidence. Delegated operational roles and permissions are not available in this workspace.</p>
+ {page==='staff'&&<><FarmStaffAccess key={farmId??'assigned'} farmId={farmId} units={units.map(unit=>({id:unit.id,name:unit.name}))}
+   load={json} grant={(path,email)=>json(path,{email})} revoke={path=>api(path,{method:'DELETE'})}/>
+ <section className="panel"><h2>Farm supervisors</h2>
+  <p className="muted">Supervisors verify farm evidence.</p>
   {!farmId?<p className="empty">Select a farm.</p>:workspaceError?<ErrorNotice message={workspaceError} retry={()=>setWorkspaceRefresh(value=>value+1)}/>:staffRows===null?<p role="status">Loading supervisors?</p>:staffRows.length?staffRows.map(row=><div className="item" key={row.id}><b>{row.full_name}</b><small>{row.email}</small></div>):<p className="empty">No supervisors assigned to this farm.</p>}
- </section>}
+ </section></>}
  {page==='sales'&&<section className="panel">
   {processingBusiness?.business_type==='integrated'&&<button className="outline" onClick={()=>openProcessing('sales')}>Processed Product Sales</button>}
   <div className="farmactions workspace-tabs" aria-label="Sales views">
