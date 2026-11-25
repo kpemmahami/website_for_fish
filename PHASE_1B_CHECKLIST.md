@@ -117,10 +117,11 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Duplicate phone prevention on new assignments and legacy conflict review | Newly implemented and locally verified |
 | Authenticator enrollment and login MFA for newly provisioned administrators | Newly implemented and locally verified |
 | Existing administrator MFA enrollment and authenticator recovery | Not implemented |
-| General phone verification and trusted devices | Not implemented |
+| Verification of a saved mobile number by SMS | Newly implemented and locally verified |
+| Secure phone replacement and trusted devices | Not implemented |
 | Password recovery by email | Newly implemented and locally verified |
 | Real recovery email delivery | Blocked by external configuration |
-| Authentication SMS integration | Not implemented |
+| Authentication SMS integration with Hubtel | Implemented but requires manual testing |
 | Farm staff creation, permissions, farm and unit assignments | Partially implemented |
 | Direct institution staff creation and role enforcement | Newly implemented and locally verified |
 | Mandatory initial-password replacement for new institution administrators and staff | Newly implemented and locally verified |
@@ -130,6 +131,12 @@ Compare account IDs, creation dates and audit events against the owner’s recor
 | Hosted verification of the Super Admin hotfix | Verified on the hosted website |
 
 ## Remaining implementation order
+
+### Batch release
+
+Keep the remaining web and backend work on the development branch. When the batch is ready, test the full Alembic upgrade from the production revision on an isolated PostgreSQL database, then apply the reviewed chain in one production upgrade and deploy once. Keep Flutter release work separate.
+
+The remaining account security work includes verified phone replacement, existing-administrator authenticator enrollment and recovery, institution contact verification, and staff access scope and audit checks. Verify live email and SMS delivery with designated accounts before marking either provider as verified in production.
 
 New farmer and processor signup requires a phone number. The web form and Flutter source send it, so release a compatible Flutter build alongside the backend if users register through the mobile app. Existing accounts keep email sign-in. Ghanaian local, country-code, and international input are normalized by the same service as phone sign-in. This change validates formatting. Ownership verification and conflict handling have separate rollout steps.
 
@@ -149,6 +156,8 @@ ORDER BY account_count DESC, phone_number;
 New farmer and processor accounts can sign in and check their status. Operational API requests are denied while approval is pending. A platform administrator can approve the account from **Super Admin → Farmer and processor approvals**. The decision is audited, and the user can refresh the status screen to open the dashboard. This uses the existing account type and audit tables and requires no new migration.
 
 Revision `0035_initial_password` adds an initial-password requirement that defaults to off for existing accounts. For new institution administrators and staff, sign in through **Bank or financial institution** with the temporary password. Set a different private password of at least 12 characters, then sign in again. The temporary password grants only a ten-minute, single-use setup challenge. The challenge cannot access any workspace API. Test with a fictional institution before deployment.
+
+Revision `0036_phone_verification` adds a timestamp and a short-lived challenge table. Pending farmers can verify their saved number from the approval screen. Signed-in farmers use **Settings**. Administrators and institution users use their dashboard. Codes expire after five minutes, allow five attempts, and can be resent after two minutes. An account's verification is cleared whenever its saved number changes. This is an opt-in ownership check during rollout. It does not change existing sign-in or approval requirements.
 
 1. Add staged identity migrations for normalized phone numbers, verification state, password-change requirements and revocable sessions. Review conflicts before enforcing uniqueness.
 2. Extend owner bootstrap and add owner-only administrator management. Extend institution provisioning with contact details and secure first-login activation.

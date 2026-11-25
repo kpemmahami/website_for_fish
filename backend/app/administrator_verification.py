@@ -192,6 +192,7 @@ def activate_administrator(data: ActivateAdministrator, db: Db):
     if account is None or account.account_type != 'pending_admin':
         raise invalid
     account.password_hash = password_hash.hash(data.password)
+    account.phone_verified_at = proof.verified_at
     account.account_type = 'admin'
     audit(db, account, 'activate_administrator', 'platform_admin', account.id)
     db.commit()

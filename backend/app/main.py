@@ -48,6 +48,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     phone_number: Mapped[str | None] = mapped_column(String(16), nullable=True)
     phone_number_claim: Mapped[str | None] = mapped_column(String(16))
+    phone_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recovery_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     password_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_suspended: Mapped[bool] = mapped_column(Boolean, server_default=false())
@@ -153,6 +154,7 @@ class UserOut(BaseModel):
     full_name: str
     email: EmailStr
     phone_number: str | None
+    phone_verified_at: datetime | None
     sms_daily_records_enabled: bool
     sms_loan_reminders_enabled: bool
     account_type: Literal['legacy', 'farmer', 'pending_farmer', 'institution', 'admin']
@@ -331,6 +333,7 @@ def assign_phone_number(db: Session, user: User, phone: str | None) -> None:
             raise HTTPException(409, 'This phone number is already assigned to an account')
     user.phone_number = phone
     user.phone_number_claim = phone
+    user.phone_verified_at = None
 
 
 FARMER_REGISTRATION_PATHS = {'/auth/register', '/auth/farmer/register'}
@@ -340,7 +343,7 @@ registration_log = logging.getLogger('aquafarm.registration')
 @app.exception_handler(RequestValidationError)
 async def safe_registration_validation(request: Request, error: RequestValidationError):
     if request.method == 'POST' and request.url.path in (
-        FARMER_REGISTRATION_PATHS | {'/auth/institution/initial-password'}
+        FARMER_REGISTRATION_PATHS | {'/auth/institution/initial-password', '/auth/me/phone-verification/confirm'}
     ):
         return JSONResponse({'detail': [{'loc': item['loc'], 'type': item['type']}
                                          for item in error.errors()]}, status_code=422)
@@ -624,6 +627,7 @@ from . import daily_reminders
 from . import administration
 from . import password_recovery
 from . import administrator_verification
+from . import phone_verification
 
 from . import institution_staff
 

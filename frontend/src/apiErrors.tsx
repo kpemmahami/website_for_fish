@@ -120,6 +120,9 @@ export function friendlyApiError(path:string,method:string,status:number,detail:
   return 'Registration is temporarily unavailable. Please try again.';
  }
  const login=/^\/auth\/(?:[^/]+\/)?login$/.test(path);
+ if(path==='/auth/me/phone-verification/confirm'&&status===400)return 'The SMS code is invalid or expired.';
+ if(path==='/auth/me/phone-verification/request'&&status===429)return 'Wait two minutes before requesting another code.';
+ if(path==='/auth/me/phone-verification/request'&&status===503)return 'The verification SMS could not be sent. Try again later.';
  if(path==='/auth/institution/initial-password'&&status===400)return 'This password setup session expired or was already used. Return to sign in.';
  if(path==='/auth/institution/initial-password'&&status===422&&detail==='Choose a password different from the initial password')return detail+'.';
  if(path==='/auth/admin/login'&&status===401&&detail==='Invalid or already used authenticator code')return 'Enter a fresh code from your authenticator app.';

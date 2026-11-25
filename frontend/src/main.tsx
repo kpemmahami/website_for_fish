@@ -13,6 +13,7 @@ import {LoanAppraisalReport} from './loanAppraisalReport';
 import {InstitutionStaff} from './institutionStaff';
 import {AdministratorDirectory} from './administratorDirectory';
 import {FarmerApprovals} from './farmerApprovals';
+import {PhoneVerification} from './phoneVerification';
 import React, {useEffect,useState,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, RefreshCw, CheckCircle2, AlertTriangle, PlusCircle, Building2, Sprout, Pencil, Archive, X, LocateFixed, Camera, RotateCcw, ChevronDown, ArrowLeft, CalendarDays, ClipboardList, Droplets, TrendingUp, Package, LifeBuoy, ShoppingBasket, Users, Settings, Eye, EyeOff} from 'lucide-react';
@@ -1417,11 +1418,23 @@ function App(){
      {authMode==='register'?'Back to sign in':'Create a farmer account'}
    </button>}
  </div></div>;
+ const phoneVerification=user&&<PhoneVerification key={`${user.id}:${user.phone_number}`}
+   phone={user.phone_number??null} verified={Boolean(user.phone_verified_at)}
+   request={async()=>{
+     const result=await json('/auth/me/phone-verification/request',{});
+     if(result.verified)await loadBase();
+     return result;
+   }}
+   confirm={async code=>{
+     const result=await json('/auth/me/phone-verification/confirm',{code});
+     setUser(current=>current?{...current,phone_verified_at:result.phone_verified_at}:null);
+   }}/>;
  if(user?.account_type==='pending_farmer')return <div className="authwrap"><div className="authcard">
    <h1>Account pending approval</h1>
    <p>An AquaFarm administrator needs to approve your account before you can use the dashboard.</p>
    {error&&<ErrorNotice message={error} dismiss={()=>setError('')}/>}
    <button className="primary" type="button" onClick={()=>void loadBase()}>Check approval status</button>
+   {phoneVerification}
    <button className="textbutton" type="button" onClick={logout}>Sign out</button>
  </div></div>;
  if(!user)return <div className="authwrap"><div className="authcard">
@@ -1566,6 +1579,7 @@ function App(){
  {page==='overview'&&dailyRecordStatus?.cycles?.some((cycle:Obj)=>cycle.is_overdue)&&<div className="alert daily-record-alert" role="alert"><AlertTriangle size={18}/><span>Feeding record missing after {dailyRecordStatus.reminder_time} for {dailyRecordStatus.cycles.filter((cycle:Obj)=>cycle.is_overdue).map((cycle:Obj)=>`${cycle.unit_name} (${cycle.species})`).join(', ')}.</span><button type="button" className="flag-link" onClick={()=>openProduction('feeding')}>Review records</button></div>}
  {page==='settings'&&<section className="panel">
   <h2>Account</h2><Line label="Name" value={user?.full_name??'Unavailable'}/><Line label="Email" value={user?.email??'Unavailable'}/>
+  {phoneVerification}
   <h2 className="spaced">Daily SMS reminder settings</h2><p className="muted">A feeding record is expected for each active cycle every day. Missing records are flagged red after {dailyRecordStatus?.reminder_time||'08:00'} Africa/Accra time.</p>
   <form className="farmform" onSubmit={saveSmsContact}>
    <label className="field"><span>Mobile number (international format, e.g. +233…)</span><input type="tel" autoComplete="tel" pattern="\+[1-9]\d{7,14}" required={Boolean(profileForm.sms_daily_records_enabled||profileForm.sms_loan_reminders_enabled)} value={profileForm.phone_number??''} onChange={e=>setProfileForm({...profileForm,phone_number:e.target.value})}/></label>
@@ -2021,6 +2035,7 @@ function App(){
   </details>}
  </>}
  {page==='admin'&&user?.is_platform_admin&&<>
+ <section className="panel">{phoneVerification}</section>
  <FarmerApprovals load={json} approve={id=>json(`/admin/farmers/${id}/approve`,{})}/>
  {user.is_platform_owner&&<AdministratorDirectory load={json}
    prepare={details=>json('/admin/administrators',details)}
@@ -2073,6 +2088,7 @@ function App(){
   <div className="twocol">
    <section className="panel">
     <h2>My financial institutions</h2>
+    {phoneVerification}
     {mine.length>0?<label className="field"><span>Institution workspace</span><select value={institutionId??''} onChange={e=>{setInstitutionId(Number(e.target.value));setSelectedApp(null);setSelectedLoan(null)}}>{mine.map(i=><option key={i.id} value={i.id}>{i.name} ({i.status})</option>)}</select></label>:<p className="empty">No institution memberships found.</p>}
     {selectedInstitution?.status==='pending'&&<div className="infobox">This institution is awaiting platform administrator verification. Lending features will become available after approval.</div>}
     {selectedInstitution?.status==='under_review'&&<div className="infobox">The platform administrator is reviewing this institution.</div>}
