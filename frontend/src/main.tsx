@@ -1,3 +1,4 @@
+import {AquaFarmDemo} from './aquaFarmDemo';
 import {DisbursementReviews} from './disbursementReviews';
 import {InstitutionPeriods} from './institutionPeriods';
 import {InstitutionLedger} from './institutionLedger';
@@ -1522,6 +1523,7 @@ function App(){
    {portal==='farmer'&&<button className="textbutton" disabled={busy} onClick={()=>{setAuthMode(authMode==='login'?'register':'login');setShowLoginPassword(false);setError('');setNotice('');setForm({})}}>
      {authMode==='register'?'Back to sign in':'Create a farmer account'}
    </button>}
+   <a className="outline demo-entry" href="#try-aquafarm">Try AquaFarm</a>
  </div></div>;
  const phoneVerification=user&&<React.Fragment key={`${user.id}:${user.phone_number}`}><PhoneVerification
    phone={user.phone_number??null} verified={Boolean(user.phone_verified_at)}
@@ -2420,4 +2422,14 @@ function App(){
 }
 function Stat({label,value,sub}:{label:string,value:string,sub:string}){return <div className="stat"><small>{label}</small><strong>{value}</strong><span>{sub}</span></div>}
 function Line({label,value}:{label:string,value:string}){return <div className="line"><span>{label}</span><b>{value}</b></div>}
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
+function AquaFarmRoot(){
+ const [demo,setDemo]=useState(()=>window.location.hash==='#try-aquafarm');
+ useEffect(()=>{
+   const sync=()=>setDemo(window.location.hash==='#try-aquafarm');
+   window.addEventListener('hashchange',sync);
+   return ()=>window.removeEventListener('hashchange',sync);
+ },[]);
+ return demo?<AquaFarmDemo/>:<App/>;
+}
+
+createRoot(document.getElementById('root')!).render(<React.StrictMode><AquaFarmRoot/></React.StrictMode>);
