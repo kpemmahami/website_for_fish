@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal
 from fastapi import HTTPException, Query, Response
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, select, func, update
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, select, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import AuditLog, Base, app, Db, CurrentUser, User, Farm, owned_farm, audit, Register, new_user, require_platform_admin
@@ -35,6 +35,7 @@ class InstitutionMember(Base):
     __table_args__ = (UniqueConstraint('institution_id','user_id',name='uq_finance_membership'),)
     id: Mapped[int] = mapped_column(primary_key=True)
     institution_id: Mapped[int] = mapped_column(ForeignKey('finance_institutions.id'), index=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey('institution_branches.id'), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default='active', server_default='active')
@@ -47,6 +48,7 @@ class LoanApplication(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     farm_id: Mapped[int] = mapped_column(ForeignKey('farms.id'), index=True)
     institution_id: Mapped[int] = mapped_column(ForeignKey('finance_institutions.id'), index=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey('institution_branches.id'), index=True)
     requested_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
     purpose: Mapped[str] = mapped_column(String(1000), nullable=False)
     term_months: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -120,7 +122,37 @@ def member(db, institution_id, user_id, permission='view'):
         raise HTTPException(404, 'Verified institution not found')
     membership = db.scalar(select(InstitutionMember).where(InstitutionMember.institution_id == institution_id, InstitutionMember.user_id == user_id, InstitutionMember.status == "active", InstitutionMember.role.in_(PERMISSION_ROLES[permission])))
     if membership is None: raise HTTPException(404, 'Institution not found or access denied')
+    if membership.branch_id is not None:
+        from .institution_branches import InstitutionBranch
+
+        branch = db.get(InstitutionBranch, membership.branch_id)
+        if branch is None or branch.institution_id != institution_id or not branch.active:
+            raise HTTPException(404, 'Institution not found or access denied')
     return institution
+
+
+def application_scope(institution_id, user_id):
+    from .institution_branches import InstitutionBranch
+
+    active_branch = select(InstitutionBranch.id).where(
+        InstitutionBranch.id == InstitutionMember.branch_id,
+        InstitutionBranch.institution_id == institution_id, InstitutionBranch.active.is_(True),
+    ).correlate(InstitutionMember).exists()
+    membership = select(InstitutionMember.id).where(
+        InstitutionMember.institution_id == institution_id, InstitutionMember.user_id == user_id,
+        InstitutionMember.status == 'active',
+        or_(InstitutionMember.branch_id.is_(None),
+            (InstitutionMember.branch_id == LoanApplication.branch_id) & active_branch),
+    ).correlate(LoanApplication).exists()
+    return LoanApplication.institution_id == institution_id, membership
+
+
+def require_application_scope(db, application, user_id):
+    scoped = db.scalar(select(LoanApplication.id).where(
+        LoanApplication.id == application.id, *application_scope(application.institution_id, user_id),
+    ))
+    if scoped is None:
+        raise HTTPException(404, 'Application not found')
 
 
 def institution_view(x):
@@ -685,12 +717,12 @@ def farmer_applications(farm_id:int,user:CurrentUser,db:Db):
 @app.get('/finance/institutions/{institution_id}/applications', tags=['Financial institutions and loan appraisal'])
 def lender_applications(institution_id:int,user:CurrentUser,db:Db):
     member(db,institution_id,user.id)
-    return [application_view(x) for x in db.scalars(select(LoanApplication).where(LoanApplication.institution_id==institution_id).order_by(LoanApplication.id.desc())).all()]
+    return [application_view(x) for x in db.scalars(select(LoanApplication).where(*application_scope(institution_id,user.id)).order_by(LoanApplication.id.desc())).all()]
 
 @app.get('/finance/institutions/{institution_id}/applications/{application_id}', tags=['Financial institutions and loan appraisal'])
 def lender_application(institution_id:int,application_id:int,user:CurrentUser,db:Db):
     member(db,institution_id,user.id)
-    obj=db.scalar(select(LoanApplication).where(LoanApplication.id==application_id,LoanApplication.institution_id==institution_id))
+    obj=db.scalar(select(LoanApplication).where(LoanApplication.id==application_id,*application_scope(institution_id,user.id)))
     if obj is None: raise HTTPException(404,'Application not found')
     return review_application(obj, user, db)
 
@@ -757,7 +789,7 @@ def farmer_application_pdf(farm_id: int, application_id: int, user: CurrentUser,
 def lender_application_pdf(institution_id: int, application_id: int, user: CurrentUser, db: Db):
     institution = member(db, institution_id, user.id)
     application = db.scalar(select(LoanApplication).where(
-        LoanApplication.id == application_id, LoanApplication.institution_id == institution_id,
+        LoanApplication.id == application_id, *application_scope(institution_id, user.id),
     ))
     if application is None:
         raise HTTPException(404, 'Application not found')
@@ -775,7 +807,7 @@ def find_application(institution_id: int, reference: str, user: CurrentUser, db:
     if match is None:
         raise HTTPException(404, 'Application not found')
     application = db.scalar(select(LoanApplication).where(
-        LoanApplication.id == int(match[1]), LoanApplication.institution_id == institution_id,
+        LoanApplication.id == int(match[1]), *application_scope(institution_id, user.id),
     ))
     if application is None or application_reference(application) != value:
         raise HTTPException(404, 'Application not found')
@@ -784,7 +816,7 @@ def find_application(institution_id: int, reference: str, user: CurrentUser, db:
 @app.post('/finance/institutions/{institution_id}/applications/{application_id}/appraise', tags=['Financial institutions and loan appraisal'])
 def appraise(institution_id:int,application_id:int,data:DecisionIn,user:CurrentUser,db:Db):
     member(db,institution_id,user.id,'appraise' if data.decision in ('approved','rejected') else 'assess')
-    obj=db.scalar(select(LoanApplication).where(LoanApplication.id==application_id,LoanApplication.institution_id==institution_id))
+    obj=db.scalar(select(LoanApplication).where(LoanApplication.id==application_id,*application_scope(institution_id,user.id)))
     if obj is None: raise HTTPException(404,'Application not found')
     if obj.status in ('approved','rejected'): raise HTTPException(409,'Final decision already recorded')
     if data.decision=='approved' and data.approved_ghs is None: raise HTTPException(422,'Approved amount required')

@@ -1,3 +1,7 @@
+import {InstitutionPeriods} from './institutionPeriods';
+import {InstitutionLedger} from './institutionLedger';
+import {InstitutionAccounts} from './institutionAccounts';
+import {ApplicationBranch, InstitutionBranches} from './institutionBranches';
 import {LoanDisbursements, recoveryRate} from './loanDisbursements';
 import {LoanCollections} from './loanCollections';
 import {InstitutionApprovalHistory, InstitutionReviewPages, type Institution} from './institutionReviewPages';
@@ -275,6 +279,23 @@ function App(){
    return ()=>window.removeEventListener('hashchange',sync);
  },[]);
  const adminView=adminHash.startsWith('#admin/')?adminHash.slice(7):'';
+ const lenderSections = {
+   pending: 'Applications awaiting appraisal',
+   approved: 'Approved applications',
+   rejected: 'Rejected applications',
+   portfolio: 'Loan accounts',
+   staff: 'Institution staff',
+   branches: 'Institution branches',
+   accounting: 'Chart of accounts',
+   periods: 'Accounting periods',
+   journals: 'Posted journals',
+   'trial-balance': 'Trial balance',
+   security: 'Institution account security',
+ } as const;
+ const lenderSection = adminHash.startsWith('#institution/') ? adminHash.slice(13) : '';
+ const lenderTitle = lenderSections[lenderSection as keyof typeof lenderSections];
+ const lenderApplications = ['pending', 'approved', 'rejected'].includes(lenderSection);
+
  const [institutionReviewSearch,setInstitutionReviewSearch]=useState('');
 
  const [institutionId,setInstitutionId]=useState<number|null>(null);const [lenderApps,setLenderApps]=useState<Obj[]>([]);
@@ -1181,6 +1202,11 @@ function App(){
  const canAssess=canAppraise||institutionRole==='loan_officer';
  const canDisburse=['owner','officer','disbursement'].includes(institutionRole);
  const canRepay=['owner','officer','collections'].includes(institutionRole);
+ const visibleLenderApplications = lenderApps.filter(application =>
+   lenderSection === 'pending' ? !['approved','rejected'].includes(application.status)
+     : application.status === lenderSection);
+ useEffect(()=>{setSelectedApp(null);setReportOpen(false)},[lenderSection, institutionId]);
+
  const [salesTab,setSalesTab]=useState<'sales'|'customers'|'invoices'|'payments'|'credit'>('sales');
  const [salesData,setSalesData]=useState<{customers:Obj[],sales:Obj[],summary:Obj,harvests:Obj[]}|null>(null);
  const [salesAction,setSalesAction]=useState<'customer'|'sale'|'payment'|null>(null);
@@ -1530,7 +1556,7 @@ function App(){
    if(balanceFilter==='current')return Boolean(!row.due_on||row.due_on>=localDate());
    return true;
  })??[];
- const pageTitle=page==='disbursements'?'Disbursements':page==='collections'?'Collections':page==='production'?(productionView==='landing'?'Production Management':productionActivities.find(item=>item.key===productionView)?.label):page==='units'?'Production units':page==='history'?'Farm Activity History':page==='reports'?(reports.find(([key])=>key===reportView)?.[1]??'Farm Reports & Analytics'):page==='expenses'?'Farm Expenses':nav.find(x=>x[0]===page)?.[1];
+ const pageTitle=page==='lender'&&lenderTitle?lenderTitle:page==='disbursements'?'Disbursements':page==='collections'?'Collections':page==='production'?(productionView==='landing'?'Production Management':productionActivities.find(item=>item.key===productionView)?.label):page==='units'?'Production units':page==='history'?'Farm Activity History':page==='reports'?(reports.find(([key])=>key===reportView)?.[1]??'Farm Reports & Analytics'):page==='expenses'?'Farm Expenses':nav.find(x=>x[0]===page)?.[1];
  const renderWorkspaceNav=(prefix:string)=><nav aria-label="Workspace">{nav.map(([key,label,ic])=>key==='production'?<div className="production-nav" key={key}>
  <button type="button" className={page==='production'?'active':''} aria-expanded={productionExpanded} aria-controls={prefix+'-production-menu'} data-keep-drawer-open={page==='production'} onClick={()=>{
    if(page==='production'&&productionExpanded)setProductionExpanded(false);
@@ -1541,7 +1567,7 @@ function App(){
  <button type="button" aria-current={page==='production'&&productionView==='landing'?'page':undefined} onClick={()=>openProduction('landing')}>Production Overview</button>
  {productionActivities.map(activity=><button type="button" key={activity.key} aria-current={page==='production'&&productionView===activity.key?'page':undefined} onClick={()=>openProduction(activity.key)}>{activity.label}</button>)}
  </div>
- </div>:<button key={key} className={(page===key||(page==='units'&&key==='farms')||(page==='expenses'&&key==='finance'))?'active':''} aria-current={page===key?'page':undefined} onClick={()=>{if(key==='overview'){backToDashboard();void loadFarm()}else if(key==='processing'){openProcessing()}else if(key==='sales'&&processorOnly){openProcessing('sales')}else if(key==='reports'){openReport(null)}else if(key==='admin'){setPage('admin');window.location.hash='admin'}else{setPage(key);window.history.replaceState(null,'',window.location.pathname+window.location.search)}setProductionExpanded(false);setForm({});setSelectedApp(null);setSelectedLoan(null);setNotice('')}}>{ic}{label}</button>)}</nav>;
+ </div>:<button key={key} className={(page===key||(page==='units'&&key==='farms')||(page==='expenses'&&key==='finance'))?'active':''} aria-current={page===key?'page':undefined} onClick={()=>{if(key==='overview'){backToDashboard();void loadFarm()}else if(key==='processing'){openProcessing()}else if(key==='sales'&&processorOnly){openProcessing('sales')}else if(key==='reports'){openReport(null)}else if(key==='admin'){setPage('admin');window.location.hash='admin'}else if(key==='lender'){setPage('lender');window.location.hash='institution'}else{setPage(key);window.history.replaceState(null,'',window.location.pathname+window.location.search)}setProductionExpanded(false);setForm({});setSelectedApp(null);setSelectedLoan(null);setNotice('')}}>{ic}{label}</button>)}</nav>;
  return <div className="shell"><MobileWorkspaceNav title={pageTitle??'Workspace'}
   navigation={renderWorkspaceNav('mobile')} accountName={user.full_name}
   overdueLoans={reminders.filter(row=>row.status==='overdue').length}
@@ -2203,10 +2229,10 @@ function App(){
       loan=>({id:loan.id,undisbursed_ghs:loan.undisbursed_ghs})):[]}/>
  </>}
  {page==='lender'&&<>
-  <div className="twocol">
+  {lenderSection&&<a className="outline" href="#institution">Back to institution dashboard</a>}
+  {!lenderSection&&<div className="twocol">
    <section className="panel">
     <h2>My financial institutions</h2>
-    {phoneVerification}
     {mine.length>0?<label className="field"><span>Institution workspace</span><select value={institutionId??''} onChange={e=>{setInstitutionId(Number(e.target.value));setSelectedApp(null);setSelectedLoan(null)}}>{mine.map(i=><option key={i.id} value={i.id}>{i.name} ({i.status})</option>)}</select></label>:<p className="empty">No institution memberships found.</p>}
     {selectedInstitution?.status==='pending'&&<div className="infobox">This institution is awaiting platform administrator verification. Lending features will become available after approval.</div>}
     {selectedInstitution?.status==='under_review'&&<div className="infobox">The platform administrator is reviewing this institution.</div>}
@@ -2218,13 +2244,26 @@ function App(){
     <p className="footnote">New institutions require platform administrator verification before lender operations.</p>
     </div>}
    </section>
-   {selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
-     <InstitutionStaff key={institutionId} id={institutionId} name={selectedInstitution.name} api={json}/>}
    {selectedInstitution?.status==='verified'&&<section className="panel">
     <h2>Loan portfolio dashboard</h2>
+    <div className="farmactions" aria-label="Institution activities">
+     <a className="outline" href="#institution/pending">Awaiting appraisal</a>
+     <a className="outline" href="#institution/approved">Approved applications</a>
+     <a className="outline" href="#institution/rejected">Rejected applications</a>
+     <a className="outline" href="#institution/portfolio">Loan accounts</a>
+     {institutionRole==='owner'&&<>
+      <a className="outline" href="#institution/staff">Institution staff</a>
+      <a className="outline" href="#institution/branches">Branches</a>
+      <a className="outline" href="#institution/accounting">Chart of accounts</a>
+      <a className="outline" href="#institution/journals">Posted journals</a>
+      <a className="outline" href="#institution/trial-balance">Trial balance</a>
+      <a className="outline" href="#institution/periods">Accounting periods</a>
+     </>}
+     <a className="outline" href="#institution/security">Account security</a>
+    </div>
     <button type="button" className="outline" onClick={()=>{setForm({});setPage('disbursements')}}>Disbursements</button>
     {canRepay&&<button type="button" className="outline" onClick={()=>{setForm({});setPage('collections')}}>Collections</button>}
-    <div className="metricrows">
+    {portfolio?<div className="metricrows">
      <Line label="Loan accounts" value={num(portfolio?.loan_accounts??lenderLoans.length)}/>
      <Line label="Active loans" value={num(portfolio?.active_loans??lenderLoans.filter(l=>l.status==='active').length)}/>
      <Line label="Total disbursements" value={money(portfolio?.total_disbursements_ghs??0)}/>
@@ -2234,16 +2273,35 @@ function App(){
      <Line label="Overdue loans" value={num(portfolio?.overdue_loans??0)}/>
      <Line label="Arrears" value={money(portfolio?.arrears_ghs??0)}/>
      <Line label="Repayment performance" value={portfolio?.repayment_performance_pct==null?'No instalments due':`${num(portfolio.repayment_performance_pct)}%`}/>
-    </div>
-    <h3 className="spaced">Loan accounts</h3>{lenderLoans.map(l=><button className="item clickable" key={l.id} onClick={()=>void openLoan(l.id)}>Loan #{l.id} · {l.status} · Outstanding {money(l.total_scheduled_balance_ghs)}<span>Manage →</span></button>)}{!lenderLoans.length&&<p className="empty">No loan accounts for this institution.</p>}
+    </div>:<p className="muted">Portfolio figures are currently unavailable.</p>}
    </section>}
-  </div>
-  {selectedInstitution?.status==='verified'&&<section className="panel"><h2>Applications for appraisal</h2><form className="farmform" onSubmit={findLoanApplication}>
+   {selectedInstitution?.status!=='verified'&&<section className="panel">
+    <a className="outline" href="#institution/security">Account security</a>
+   </section>}
+  </div>}
+  {lenderSection==='security'&&<section className="panel"><h2>Account security</h2>{phoneVerification}</section>}
+  {(lenderSection==='journals'||lenderSection==='trial-balance')&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
+    <InstitutionLedger key={institutionId+':'+lenderSection} institutionId={institutionId} mode={lenderSection} load={json}/>}
+  {lenderSection==='periods'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
+    <InstitutionPeriods key={institutionId} institutionId={institutionId} api={json}/>}
+  {lenderSection==='accounting'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
+    <InstitutionAccounts key={institutionId} institutionId={institutionId} api={json}/>}
+  {lenderSection==='branches'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
+    <InstitutionBranches key={institutionId} institutionId={institutionId} api={json}/>}
+  {lenderSection==='staff'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
+    <InstitutionStaff key={institutionId} id={institutionId} name={selectedInstitution.name} api={json}/>}
+  {lenderSection==='portfolio'&&selectedInstitution?.status==='verified'&&<section className="panel"><h2>Loan accounts</h2>
+{lenderLoans.map(l=><button className="item clickable" key={l.id} onClick={()=>void openLoan(l.id)}>Loan #{l.id} · {l.status} · Outstanding {money(l.total_scheduled_balance_ghs)}<span>Manage →</span></button>)}{!lenderLoans.length&&<p className="empty">No loan accounts for this institution.</p>}
+  </section>}
+  {lenderApplications&&!selectedApp&&selectedInstitution?.status==='verified'&&<section className="panel"><h2>{lenderTitle}</h2><form className="farmform" onSubmit={findLoanApplication}>
  <label className="field"><span>Application reference</span><input required maxLength={35} value={referenceSearch} onChange={e=>setReferenceSearch(e.target.value)}/></label>
  <button className="outline" disabled={busy}>Find Loan Application</button>
- </form><div className="tablewrap"><table><thead><tr><th>ID</th><th>Farm ID</th><th>Requested</th><th>Purpose</th><th>Status</th><th></th></tr></thead><tbody>{lenderApps.map(a=><tr key={a.id}><td>{a.reference}</td><td>#{a.farm_id}</td><td>{money(a.requested_ghs)}</td><td>{a.purpose}</td><td><span className="pill">{a.status}</span></td><td><button className="outline small" onClick={()=>void openApp(a.id)}>{a.status==='approved'?'Open loan':'Review'}</button></td></tr>)}</tbody></table>{!lenderApps.length&&<p className="empty">No applications available.</p>}</div></section>}
-  {selectedApp&&<section className="panel">
+ </form><div className="tablewrap"><table><thead><tr><th>ID</th><th>Farm ID</th><th>Requested</th><th>Purpose</th><th>Status</th><th></th></tr></thead><tbody>{visibleLenderApplications.map(a=><tr key={a.id}><td>{a.reference}</td><td>#{a.farm_id}</td><td>{money(a.requested_ghs)}</td><td>{a.purpose}</td><td><span className="pill">{a.status}</span></td><td><button className="outline small" onClick={()=>void openApp(a.id)}>{a.status==='approved'?'Open loan':'Review'}</button></td></tr>)}</tbody></table>{!visibleLenderApplications.length&&<p className="empty">No applications in this status.</p>}</div></section>}
+  {lenderApplications&&selectedApp&&selectedInstitution?.status==='verified'&&<section className="panel">
    <div className="between"><h2>Application #{selectedApp.id}</h2><button className="textbutton" onClick={()=>setSelectedApp(null)}>Close</button></div>
+   {institutionRole==='owner'&&institutionId!=null&&<ApplicationBranch key={selectedApp.id}
+     id={selectedApp.id} institutionId={institutionId} branchId={selectedApp.branch_id} api={json}
+     onChange={branch_id=>setSelectedApp(current=>current?.id===selectedApp.id?{...current,branch_id}:current)}/>}
    <p><b>Purpose:</b> {selectedApp.purpose}</p><p><b>Requested:</b> {money(selectedApp.requested_ghs)} · <b>Status:</b> {selectedApp.status}</p>
    {selectedApp.shared_report_snapshot&&<>
     <button type="button" className="outline" onClick={()=>setReportOpen(true)}>Preview Report</button>

@@ -22,12 +22,14 @@ class CollectionEntry extends StatefulWidget {
     required this.controller,
     required this.scope,
     required this.loan,
+    this.deposit = false,
     super.key,
   });
 
   final AppController controller;
   final String scope;
   final Map loan;
+  final bool deposit;
 
   @override
   State<CollectionEntry> createState() => _CollectionEntryState();
@@ -64,7 +66,7 @@ class _CollectionEntryState extends State<CollectionEntry> {
           ownerId: widget.controller.user!['id'] as int,
           farm: const {},
           unit: const {},
-          activity: 'loan repayment',
+          activity: widget.deposit ? 'customer deposit' : 'loan repayment',
           collection: true,
         ),
       ),
@@ -89,6 +91,7 @@ class _CollectionEntryState extends State<CollectionEntry> {
         'collection_id': newCollectionId(),
         'scope': widget.scope,
         'loan_id': widget.loan['loan_id'],
+        'kind': widget.deposit ? 'deposit' : 'repayment',
         'amount': _amount.text.trim(),
         'video_path': clip.videoPath,
         'captured_at': clip.capturedAt,
@@ -110,13 +113,31 @@ class _CollectionEntryState extends State<CollectionEntry> {
   Widget build(BuildContext context) => PopScope(
     canPop: !_busy || _clip == null,
     child: Scaffold(
-      appBar: AppBar(title: const Text('Collect loan repayment')),
+      backgroundColor: const Color(0xffedf6f4),
+      appBar: AppBar(
+        backgroundColor: const Color(0xff113042),
+        foregroundColor: Colors.white,
+        title: Text(
+          widget.deposit ? 'Record deposit' : 'Collect loan repayment',
+        ),
+      ),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Text(
-            '${widget.loan['customer_name']} · ${widget.loan['account_number']}',
+          Card(
+            color: Colors.white,
+            child: ListTile(
+              leading: const Icon(
+                Icons.account_balance_outlined,
+                color: Color(0xff007d74),
+              ),
+              title: Text(widget.loan['customer_name'] as String),
+              subtitle: widget.deposit
+                  ? null
+                  : Text(widget.loan['account_number'] as String),
+            ),
           ),
+          const SizedBox(height: 12),
           TextField(
             controller: _amount,
             enabled: _clip == null && !_busy,
@@ -126,6 +147,13 @@ class _CollectionEntryState extends State<CollectionEntry> {
             ),
             onChanged: (_) => setState(() {}),
           ),
+          if (!widget.deposit)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                'Any amount above the outstanding loan balance is recorded as a separate deposit with this institution.',
+              ),
+            ),
           CheckboxListTile(
             value: _consent,
             onChanged: _clip != null || _busy
@@ -165,6 +193,7 @@ Future<int> syncCollections(AppController controller, String scope) async {
     final loanId = row['loan_id'] as int;
     final path = row['video_path'] as String;
     final capturedAt = row['captured_at'] as String;
+    final deposit = row['kind'] == 'deposit';
     try {
       final evidence =
           (row['evidence_id'] as int?) ??
@@ -173,6 +202,7 @@ Future<int> syncCollections(AppController controller, String scope) async {
             path,
             capturedAt,
             row['device_recorded_at'] as String,
+            kind: deposit ? 'deposit' : 'repayment',
           );
       await controller.store.updateCollection(scope, id, {
         'evidence_id': evidence,
@@ -180,7 +210,7 @@ Future<int> syncCollections(AppController controller, String scope) async {
       if (controller.token != token || controller.api != api) break;
       await api.send(
         'POST',
-        '/finance/loans/$loanId/field-repayments',
+        '/finance/loans/$loanId/${deposit ? 'field-deposits' : 'field-repayments'}',
         body: {
           'collection_id': id,
           'amount_ghs': row['amount'],
@@ -199,4 +229,49 @@ Future<int> syncCollections(AppController controller, String scope) async {
     }
   }
   return synced;
+}
+
+class CollectionDepositsPage extends StatefulWidget {
+  const CollectionDepositsPage({required this.controller, super.key});
+  final AppController controller;
+
+  @override
+  State<CollectionDepositsPage> createState() => _CollectionDepositsPageState();
+}
+
+class _CollectionDepositsPageState extends State<CollectionDepositsPage> {
+  late final Future<dynamic> _deposits = widget.controller.api.get(
+    '/finance/my-collection-deposits',
+  );
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Recorded deposits')),
+    body: FutureBuilder<dynamic>(
+      future: _deposits,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Center(child: Text(snapshot.error.toString()));
+        }
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final deposits = snapshot.data as List;
+        if (deposits.isEmpty) {
+          return const Center(child: Text('No deposits recorded yet.'));
+        }
+        return ListView(
+          children: [
+            for (final row in deposits)
+              ListTile(
+                title: Text(row['institution'] as String),
+                trailing: Text(
+                  'GHS ${(row['recorded_deposits_ghs'] as num).toStringAsFixed(2)}',
+                ),
+              ),
+          ],
+        );
+      },
+    ),
+  );
 }

@@ -1,5 +1,6 @@
 """Verify a saved phone number with a short-lived SMS code."""
 import hmac
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -11,9 +12,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .daily_reminders import SmsDeliveryError, hubtel_send_sms
 from .main import (
-    SECRET_KEY, AuthenticatedUser, Base, Db, User, app, assign_phone_number,
+    DATABASE_URL, SECRET_KEY, AuthenticatedUser, Base, Db, User, app, assign_phone_number,
     audit, duplicate_phone_claim, password_binding, password_hash,
 )
+from .development import enabled as local_test_enabled
 from .phone_numbers import PhoneNumber
 
 CODE_LIFETIME = timedelta(minutes=5)
@@ -54,6 +56,18 @@ def code_digest(user_id: int, phone: str, nonce: str, code: str) -> str:
     return hmac.digest(SECRET_KEY.encode(), f'phone-verification:{user_id}:{phone}:{nonce}:{code}'.encode(), 'sha256').hex()
 
 
+def local_test_sms_enabled() -> bool:
+    return os.getenv('AQUAFARM_LOCAL_TEST_SMS') == '1' and local_test_enabled(DATABASE_URL)
+
+
+def issue_phone_code(db, account, phone, description, *, purpose=None, allow_local_test=True):
+    local_test = allow_local_test and local_test_sms_enabled()
+    code = '000002' if local_test else f'{secrets.randbelow(1_000_000):06d}'
+    save_challenge(db, account, phone, code, purpose=purpose)
+    if not local_test:
+        send_code(phone, code, description)
+
+
 @app.post('/auth/me/phone-verification/request')
 def request_phone_verification(user: AuthenticatedUser, db: Db):
     account = db.scalar(select(User).where(User.id == user.id).with_for_update()
@@ -65,9 +79,7 @@ def request_phone_verification(user: AuthenticatedUser, db: Db):
     if account.phone_verified_at is not None:
         return {'verified': True}
     phone = account.phone_number
-    code = f'{secrets.randbelow(1_000_000):06d}'
-    save_challenge(db, account, phone, code)
-    send_code(phone, code, 'verification')
+    issue_phone_code(db, account, phone, 'verification', allow_local_test=not account.is_platform_admin)
     return {'verified': False, 'destination': f'•••{phone[-4:]}'}
 
 
@@ -221,9 +233,8 @@ def send_institution_phone_code(db: Db, account: User, token: str):
     phone = account.phone_number
     if not phone:
         raise HTTPException(409, 'A mobile number is required for institution password setup')
-    code = f'{secrets.randbelow(1_000_000):06d}'
-    save_challenge(db, account, phone, code, purpose=f'institution-phone:{token}')
-    send_code(phone, code, 'institution account verification')
+    issue_phone_code(db, account, phone, 'institution account verification',
+                     purpose=f'institution-phone:{token}')
     return {'destination': f'•••{phone[-4:]}'}
 
 

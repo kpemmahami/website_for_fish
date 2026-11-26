@@ -148,3 +148,23 @@ def test_deployed_frontend_preflight_on_actual_application():
     if os.getenv('RENDER', '').lower() != 'true':
         local = client.options(PATH, headers={**headers, 'Origin': 'http://localhost:5173'})
         assert local.headers['Access-Control-Allow-Origin'] == 'http://localhost:5173'
+
+
+def test_local_signup_can_open_workspace_without_approval(monkeypatch):
+    from sqlalchemy.engine import URL
+    from app import development, main
+
+    payload = {'full_name': 'Android Test Farmer', 'email': 'android-test-signup@example.com',
+               'password': PASSWORD, 'phone_number': '0245550198'}
+    monkeypatch.setenv('AQUAFARM_ENV', 'local-test')
+    monkeypatch.setenv('AQUAFARM_LOCAL_TEST_AUTO_APPROVE', '1')
+    assert not development.auto_approve_signup('postgresql://localhost/aquafarm')
+    assert not development.auto_approve_signup('sqlite:///other.db')
+    monkeypatch.setattr(main, 'DATABASE_URL', URL.create('sqlite', database=str(development.TEST_DATABASE)))
+    result = client.post('/auth/register', json=payload)
+    assert result.status_code == 201, result.text
+    assert result.json()['account_type'] == 'farmer'
+    sign_in = client.post('/auth/login', json={'email': payload['email'], 'password': PASSWORD})
+    assert sign_in.status_code == 200, sign_in.text
+    headers = {'Authorization': f"Bearer {sign_in.json()['access_token']}"}
+    assert client.get('/farms', headers=headers).status_code == 200

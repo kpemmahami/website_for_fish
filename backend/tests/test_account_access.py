@@ -497,3 +497,26 @@ def test_registration_accepts_legitimate_names_and_eight_character_password(name
 
 def test_local_aliases_unavailable_on_ordinary_database():
     assert client.post('/auth/admin/login', json={'email': 'admin', 'password': 'user1234'}).status_code == 401
+
+
+def test_fixed_sms_code_requires_explicit_isolated_test_database(monkeypatch):
+    from unittest.mock import patch
+    from sqlalchemy.engine import URL
+    from app import development, phone_verification
+
+    monkeypatch.setenv('AQUAFARM_LOCAL_TEST_SMS', '1')
+    monkeypatch.setenv('AQUAFARM_ENV', 'local-test')
+    monkeypatch.setattr(phone_verification, 'DATABASE_URL', 'sqlite:///another.db')
+    assert not phone_verification.local_test_sms_enabled()
+    monkeypatch.setattr(phone_verification, 'DATABASE_URL', 'postgresql://localhost/aquafarm')
+    assert not phone_verification.local_test_sms_enabled()
+    monkeypatch.setattr(phone_verification, 'DATABASE_URL',
+                        URL.create('sqlite', database=str(development.TEST_DATABASE)))
+    assert phone_verification.local_test_sms_enabled()
+
+    with patch.object(phone_verification, 'save_challenge') as save, patch.object(phone_verification, 'send_code') as send:
+        phone_verification.issue_phone_code(None, None, '+233245550100', 'test')
+        assert save.call_args.args[3] == '000002'
+        send.assert_not_called()
+    monkeypatch.delenv('AQUAFARM_LOCAL_TEST_SMS')
+    assert not phone_verification.local_test_sms_enabled()

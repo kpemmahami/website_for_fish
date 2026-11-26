@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import update, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func, or_
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import Base, app, Db, CurrentUser, Farm, User, owned_farm, audit
-from .lending import Institution, LoanApplication, LoanDecision, member, ghs
+from .lending import Institution, LoanApplication, LoanDecision, application_scope, require_application_scope, member, ghs
 
 TAG = ['Loan disbursement and recovery (manual ledger)']
 def utcnow(): return datetime.now(timezone.utc)
@@ -77,6 +77,26 @@ class LoanRepayment(Base):
     paid_on: Mapped[date] = mapped_column(Date, nullable=False)
     recorded_by: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+class CollectionDeposit(Base):
+    __tablename__ = 'collection_deposits'
+    repayment_id: Mapped[int] = mapped_column(ForeignKey('loan_repayments.id'), primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    amount_pesewas: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class StandaloneDeposit(Base):
+    __tablename__ = 'standalone_collection_deposits'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reference: Mapped[str] = mapped_column(String(48), unique=True)
+    institution_id: Mapped[int] = mapped_column(ForeignKey('finance_institutions.id'), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    evidence_id: Mapped[int] = mapped_column(ForeignKey('loan_evidence.id'), unique=True)
+    recorded_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    amount_pesewas: Mapped[int] = mapped_column(Integer)
+    paid_on: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
 
 class LoanEvidence(Base):
     __tablename__='loan_evidence'
@@ -143,10 +163,17 @@ class TransactionIn(BaseModel):
     transaction_date: date
     evidence_id: int = Field(gt=0)
 
+def scoped_loan_ids(institution_id, user_id):
+    return select(LoanAccount.id).join(LoanApplication, LoanApplication.id == LoanAccount.application_id).where(
+        LoanAccount.institution_id == institution_id, *application_scope(institution_id, user_id),
+    )
+
+
 def loan_for_lender(db, loan_id, user, permission='view'):
     loan=db.get(LoanAccount,loan_id)
     if loan is None: raise HTTPException(404,'Loan not found')
     member(db,loan.institution_id,user.id,permission)
+    require_application_scope(db, db.get(LoanApplication, loan.application_id), user.id)
     return loan
 
 def loan_for_view(db, loan_id, user):
@@ -156,8 +183,7 @@ def loan_for_view(db, loan_id, user):
         owned_farm(loan.farm_id,user,db)
         return loan
     except HTTPException:
-        member(db,loan.institution_id,user.id)
-        return loan
+        return loan_for_lender(db, loan_id, user)
 
 def sums(db, loan):
     disbursed=db.scalar(select(func.coalesce(func.sum(LoanDisbursement.amount_pesewas),0)).where(LoanDisbursement.loan_id==loan.id))
@@ -370,13 +396,13 @@ async def upload_application_evidence(
 @app.post('/finance/loans/{loan_id}/evidence',status_code=201,tags=TAG)
 async def upload_transaction_evidence(
     loan_id:int,request:Request,user:CurrentUser,db:Db,
-    record_type:Literal['disbursement','repayment'],
+    record_type:Literal['disbursement','repayment','deposit'],
     captured_at:datetime,device_recorded_at:datetime,duration_seconds:int, retry_upload:bool=False,
 ):
     loan=loan_for_lender(db,loan_id,user,'disburse' if record_type=='disbursement' else 'repay')
     return await store_loan_evidence(
         loan.farm_id,record_type,loan.id,request,captured_at,device_recorded_at,duration_seconds,user,db,
-        retry_upload=retry_upload and record_type=='repayment')
+        retry_upload=retry_upload and record_type in ('repayment','deposit'))
 
 
 @app.get('/finance/loan-evidence/{evidence_id}/video',tags=TAG)
@@ -394,6 +420,7 @@ def download_loan_evidence(evidence_id:int,user:CurrentUser,db:Db):
             if application is None:
                 raise HTTPException(404,'Loan video evidence not found')
             member(db,application.institution_id,user.id)
+            require_application_scope(db, application, user.id)
         else:
             raise HTTPException(404,'Loan video evidence not found')
     from .evidence import evidence_directory
@@ -408,6 +435,7 @@ def open_loan(institution_id:int,data:OpenLoanIn,user:CurrentUser,db:Db):
     member(db,institution_id,user.id,'appraise')
     application=db.get(LoanApplication,data.application_id)
     if application is None or application.institution_id!=institution_id: raise HTTPException(404,'Approved application not found')
+    require_application_scope(db, application, user.id)
     if application.status!='approved': raise HTTPException(409,'Application not approved')
     if db.scalar(select(LoanAccount.id).where(LoanAccount.application_id==application.id)) is not None: raise HTTPException(409,'Loan account already exists')
     decision=db.scalar(select(LoanDecision).where(LoanDecision.application_id==application.id,LoanDecision.decision=='approved').order_by(LoanDecision.id.desc()))
@@ -477,6 +505,9 @@ def respond_to_offer(loan_id: int, data: LoanOfferResponse, user: CurrentUser, d
 @app.post('/finance/loans/{loan_id}/disbursements',status_code=201,tags=TAG)
 def record_disbursement(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
     loan=loan_for_lender(db,loan_id,user,'disburse')
+    # Serialize writes before checking the remaining authorization on SQLite and PostgreSQL.
+    db.execute(update(LoanAccount).where(LoanAccount.id == loan.id).values(status=LoanAccount.status))
+    db.refresh(loan)
     if loan.status!='awaiting_disbursement': raise HTTPException(409,'Loan not awaiting disbursement')
     if db.scalar(select(LoanDisbursement.id).where(LoanDisbursement.loan_id==loan.id,LoanDisbursement.reference==data.reference)) is not None:
         raise HTTPException(409,'Disbursement reference already recorded')
@@ -521,8 +552,12 @@ def record_field_repayment(loan_id: int, data: FieldRepaymentIn, user: CurrentUs
         amount_ghs=data.amount_ghs, reference=f'COLLECTION-{data.collection_id}',
         transaction_date=data.transaction_date, evidence_id=data.evidence_id,
     ), user, field_collection=True)
+    deposit = db.get(CollectionDeposit, transaction.id)
+    deposited = deposit.amount_pesewas if deposit else 0
     return {'id': transaction.id, 'reference': transaction.reference,
-            'amount_ghs': ghs(transaction.amount_pesewas), 'posted_at': transaction.created_at}
+            'amount_ghs': ghs(transaction.amount_pesewas + deposited),
+            'applied_to_loan_ghs': ghs(transaction.amount_pesewas),
+            'deposited_ghs': ghs(deposited), 'posted_at': transaction.created_at}
 
 
 def post_repayment(db, loan, data, user, *, field_collection=False):
@@ -534,8 +569,10 @@ def post_repayment(db, loan, data, user, *, field_collection=False):
     ))
     if existing is not None:
         evidence = db.get(LoanEvidence, data.evidence_id) if field_collection else None
+        deposit = db.get(CollectionDeposit, existing.id) if field_collection else None
+        original_amount = existing.amount_pesewas + (deposit.amount_pesewas if deposit else 0)
         if (field_collection and existing.recorded_by == user.id
-                and existing.amount_pesewas == cents(data.amount_ghs)
+                and original_amount == cents(data.amount_ghs)
                 and existing.paid_on == data.transaction_date
                 and evidence is not None and evidence.record_type == 'repayment'
                 and evidence.loan_id == loan.id and evidence.record_id == existing.id
@@ -551,7 +588,13 @@ def post_repayment(db, loan, data, user, *, field_collection=False):
     fees_paid=db.scalar(select(func.coalesce(func.sum(LoanRepayment.fees_pesewas),0)).where(LoanRepayment.loan_id==loan.id))
     remaining_fees=loan_fee_total(loan)-fees_paid
     remaining_principal=disbursed-paid_p
-    if amount>remaining_interest+remaining_fees+remaining_principal: raise HTTPException(422,'Payment exceeds outstanding scheduled balance')
+    balance = remaining_interest + remaining_fees + remaining_principal
+    excess = max(0, amount - balance)
+    if excess and not field_collection:
+        raise HTTPException(422, 'Payment exceeds outstanding scheduled balance')
+    if amount > 2_147_483_647:
+        raise HTTPException(422, 'Amount exceeds the maximum supported collection')
+    amount -= excess
     evidence=required_loan_evidence(db,data.evidence_id,loan.farm_id,'repayment',user.id,loan.id)
     interest_part=min(amount,remaining_interest)
     fees_part=min(amount-interest_part,remaining_fees)
@@ -561,9 +604,15 @@ def post_repayment(db, loan, data, user, *, field_collection=False):
         paid_on=data.transaction_date,recorded_by=user.id)
     db.add(transaction);db.flush()
     evidence.record_id=transaction.id
-    if amount==remaining_interest+remaining_fees+remaining_principal: loan.status='repaid'
+    if excess:
+        customer = db.get(Farm, loan.farm_id).owner_id
+        db.add(CollectionDeposit(repayment_id=transaction.id, customer_id=customer, amount_pesewas=excess))
+        audit(db, user, 'record_excess_deposit', 'loan_repayment', transaction.id,
+              json.dumps({'amount_ghs': ghs(excess), 'institution_id': loan.institution_id, 'customer_id': customer}))
+    if amount == balance:
+        loan.status = 'repaid'
     audit(db,user,'repay','loan_account',loan.id,json.dumps({
-        'amount_ghs':float(data.amount_ghs),'reference':data.reference,'evidence_id':evidence.id,
+        'amount_ghs':ghs(amount),'reference':data.reference,'evidence_id':evidence.id,
         'interest_ghs':ghs(interest_part),'fees_ghs':ghs(fees_part),'principal_ghs':ghs(principal_part),
         **({'customer_consented': True} if field_collection else {}),
     }));db.commit()
@@ -573,14 +622,56 @@ def collection_account_number(loan_id: int) -> str:
     return f'AQUA-LOAN-{loan_id:06d}'
 
 
+@app.post('/finance/loans/{loan_id}/field-deposits', tags=TAG)
+def record_field_deposit(loan_id: int, data: FieldRepaymentIn, user: CurrentUser, db: Db):
+    # The loan identifies an established customer relationship and scopes video access.
+    # A deposit has no effect on that loan's balance.
+    loan = loan_for_lender(db, loan_id, user, 'repay')
+    db.execute(update(LoanAccount).where(LoanAccount.id == loan.id).values(status=LoanAccount.status))
+    db.refresh(loan)
+    if loan.status not in ('active', 'repaid'):
+        raise HTTPException(409, 'An established institution customer is required')
+    customer_id = db.get(Farm, loan.farm_id).owner_id
+    reference = f'DEPOSIT-{data.collection_id}'
+    amount = cents(data.amount_ghs)
+    if amount > 2_147_483_647 or data.transaction_date > utcnow().date():
+        raise HTTPException(422, 'Invalid deposit amount or date')
+    deposit = db.scalar(select(StandaloneDeposit).where(StandaloneDeposit.reference == reference))
+    if deposit is not None:
+        if (deposit.institution_id != loan.institution_id or deposit.customer_id != customer_id
+                or deposit.recorded_by != user.id or deposit.evidence_id != data.evidence_id
+                or deposit.amount_pesewas != amount or deposit.paid_on != data.transaction_date):
+            raise HTTPException(409, 'Deposit reference already recorded')
+    else:
+        evidence = required_loan_evidence(db, data.evidence_id, loan.farm_id, 'deposit', user.id, loan.id)
+        deposit = StandaloneDeposit(reference=reference, institution_id=loan.institution_id,
+                                    customer_id=customer_id, evidence_id=evidence.id,
+                                    recorded_by=user.id, amount_pesewas=amount, paid_on=data.transaction_date)
+        db.add(deposit)
+        try:
+            db.flush()
+        except IntegrityError as error:
+            db.rollback()
+            raise HTTPException(409, 'Deposit already submitted. Retry the original collection.') from error
+        evidence.record_id = deposit.id
+        audit(db, user, 'record_deposit', 'collection_deposit', deposit.id,
+              json.dumps({'institution_id': loan.institution_id, 'customer_consented': True}))
+        db.commit()
+    return {'id': deposit.id, 'reference': deposit.reference, 'amount_ghs': ghs(amount),
+            'applied_to_loan_ghs': 0, 'deposited_ghs': ghs(amount), 'posted_at': deposit.created_at}
+
+
 @app.get('/finance/institutions/{institution_id}/collection-customers', tags=TAG)
 def collection_customers(institution_id: int, user: CurrentUser, db: Db,
-                         search: str = Query('', max_length=120), offset: int = Query(0, ge=0)):
+                         search: str = Query('', max_length=120), offset: int = Query(0, ge=0),
+                         deposits: bool = False):
     member(db, institution_id, user.id, 'repay')
+    visible_loans = scoped_loan_ids(institution_id, user.id)
     query = select(LoanAccount.id, User.full_name, Farm.name).join(
         Farm, Farm.id == LoanAccount.farm_id,
     ).join(User, User.id == Farm.owner_id).where(
-        LoanAccount.institution_id == institution_id, LoanAccount.status == 'active',
+        LoanAccount.id.in_(visible_loans),
+        LoanAccount.status.in_(('active', 'repaid')) if deposits else LoanAccount.status == 'active',
     )
     term = search.strip().lower()
     if term:
@@ -590,6 +681,13 @@ def collection_customers(institution_id: int, user: CurrentUser, db: Db,
         if number.isascii() and number.isdecimal() and len(number) <= 9:
             conditions.append(LoanAccount.id == int(number))
         query = query.where(or_(*conditions))
+    if deposits:
+        eligible = query.with_only_columns(
+            User.id.label('customer_id'), func.max(LoanAccount.id).label('loan_id'),
+        ).group_by(User.id).subquery()
+        query = select(LoanAccount.id, User.full_name, Farm.name).join(
+            Farm, Farm.id == LoanAccount.farm_id,
+        ).join(User, User.id == Farm.owner_id).join(eligible, eligible.c.loan_id == LoanAccount.id)
     rows = db.execute(query.order_by(User.full_name, LoanAccount.id).offset(offset).limit(26)).all()
     return {'items': [
         {'loan_id': loan_id, 'account_number': collection_account_number(loan_id),
@@ -602,18 +700,19 @@ def collection_customers(institution_id: int, user: CurrentUser, db: Db,
 def institution_disbursements(institution_id: int, user: CurrentUser, db: Db,
                               offset: int = Query(0, ge=0)):
     member(db, institution_id, user.id)
+    visible_loans = scoped_loan_ids(institution_id, user.id)
     disbursed = select(
         LoanDisbursement.loan_id,
         func.sum(LoanDisbursement.amount_pesewas).label('amount'),
     ).join(LoanAccount, LoanAccount.id == LoanDisbursement.loan_id).where(
-        LoanAccount.institution_id == institution_id,
+        LoanAccount.id.in_(visible_loans),
     ).group_by(LoanDisbursement.loan_id).subquery()
     recovered = select(
         LoanRepayment.loan_id,
         func.sum(LoanRepayment.amount_pesewas).label('amount'),
         func.sum(LoanRepayment.principal_pesewas).label('principal'),
     ).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id).where(
-        LoanAccount.institution_id == institution_id,
+        LoanAccount.id.in_(visible_loans),
     ).group_by(LoanRepayment.loan_id).subquery()
     amounts = select(
         disbursed.c.loan_id, disbursed.c.amount.label('disbursed'),
@@ -654,29 +753,69 @@ def institution_disbursements(institution_id: int, user: CurrentUser, db: Db,
 def daily_collections(institution_id: int, user: CurrentUser, db: Db,
                       day: date | None = None, offset: int = Query(0, ge=0)):
     member(db, institution_id, user.id, 'repay')
+    visible_loans = scoped_loan_ids(institution_id, user.id)
     from .daily_reminders import local_now
     day = day or local_now().date()
-    filters = (LoanAccount.institution_id == institution_id, LoanRepayment.paid_on == day)
-    query = select(LoanRepayment, User.full_name, LoanEvidence.id, LoanEvidence.media_type).select_from(
+    filters = (LoanAccount.id.in_(visible_loans), LoanRepayment.paid_on == day)
+    query = select(LoanRepayment, User.full_name, LoanEvidence.id, LoanEvidence.media_type,
+                   func.coalesce(CollectionDeposit.amount_pesewas, 0)).select_from(
         LoanRepayment,
     ).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id).join(
         Farm, Farm.id == LoanAccount.farm_id,
     ).join(User, User.id == Farm.owner_id).outerjoin(
         LoanEvidence, (LoanEvidence.loan_id == LoanRepayment.loan_id)
         & (LoanEvidence.record_type == 'repayment') & (LoanEvidence.record_id == LoanRepayment.id),
-    ).where(*filters)
+    ).outerjoin(CollectionDeposit, CollectionDeposit.repayment_id == LoanRepayment.id).where(*filters)
     rows = db.execute(query.order_by(LoanRepayment.id.desc()).offset(offset).limit(26)).all()
-    total, count = db.execute(select(
+    total, count, deposited_total = db.execute(select(
         func.coalesce(func.sum(LoanRepayment.amount_pesewas), 0), func.count(LoanRepayment.id),
-    ).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id).where(*filters)).one()
-    return {'day': day, 'total_ghs': ghs(total), 'count': count, 'has_more': len(rows) > 25,
+        func.coalesce(func.sum(CollectionDeposit.amount_pesewas), 0),
+    ).select_from(LoanRepayment).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id)
+      .outerjoin(CollectionDeposit, CollectionDeposit.repayment_id == LoanRepayment.id).where(*filters)).one()
+    deposit_filters = (StandaloneDeposit.institution_id == institution_id, StandaloneDeposit.paid_on == day,
+                       StandaloneDeposit.evidence_id.in_(select(LoanEvidence.id).where(LoanEvidence.loan_id.in_(visible_loans))))
+    standalone_total, standalone_count = db.execute(select(
+        func.coalesce(func.sum(StandaloneDeposit.amount_pesewas), 0), func.count(StandaloneDeposit.id),
+    ).where(*deposit_filters)).one()
+    standalone_rows = db.execute(select(StandaloneDeposit, User.full_name, LoanEvidence.media_type)
+        .join(User, User.id == StandaloneDeposit.customer_id)
+        .join(LoanEvidence, LoanEvidence.id == StandaloneDeposit.evidence_id)
+        .where(*deposit_filters).order_by(StandaloneDeposit.id.desc()).offset(offset).limit(26)).all()
+    deposited_total += standalone_total
+    return {'day': day, 'total_ghs': ghs(total), 'deposited_ghs': ghs(deposited_total),
+            'standalone_count': standalone_count, 'standalone_items': [
+                {'id': row.id, 'customer_name': name, 'reference': row.reference,
+                 'deposited_ghs': ghs(row.amount_pesewas), 'evidence_id': row.evidence_id,
+                 'evidence_media_type': media_type}
+                for row, name, media_type in standalone_rows[:25]
+            ],
+            'total_received_ghs': ghs(total + deposited_total), 'count': count, 'has_more': len(rows) > 25 or len(standalone_rows) > 25,
             'items': [
                 {'id': row.id, 'loan_id': row.loan_id, 'account_number': collection_account_number(row.loan_id),
                  'customer_name': customer, 'amount_ghs': ghs(row.amount_pesewas), 'reference': row.reference,
+                 'deposited_ghs': ghs(deposited), 'total_received_ghs': ghs(row.amount_pesewas + deposited),
                  'posted_at': row.created_at, 'collector_id': row.recorded_by, 'evidence_id': evidence_id,
                  'evidence_media_type': media_type}
-                for row, customer, evidence_id, media_type in rows[:25]
+                for row, customer, evidence_id, media_type, deposited in rows[:25]
             ]}
+
+
+@app.get('/finance/my-collection-deposits', tags=TAG)
+def my_collection_deposits(user: CurrentUser, db: Db):
+    excess = select(LoanAccount.institution_id.label('institution_id'),
+                    CollectionDeposit.amount_pesewas.label('amount')).select_from(CollectionDeposit).join(
+        LoanRepayment, LoanRepayment.id == CollectionDeposit.repayment_id,
+    ).join(LoanAccount, LoanAccount.id == LoanRepayment.loan_id).where(CollectionDeposit.customer_id == user.id)
+    standalone = select(StandaloneDeposit.institution_id, StandaloneDeposit.amount_pesewas).where(
+        StandaloneDeposit.customer_id == user.id,
+    )
+    deposits = excess.union_all(standalone).subquery()
+    rows = db.execute(select(Institution.id, Institution.name, func.sum(deposits.c.amount)).join(
+        deposits, deposits.c.institution_id == Institution.id,
+    ).group_by(Institution.id, Institution.name).order_by(Institution.name, Institution.id)).all()
+    return [{'institution_id': institution_id, 'institution': name, 'recorded_deposits_ghs': ghs(amount)}
+            for institution_id, name, amount in rows]
+
 
 
 @app.get('/finance/loans/{loan_id}',tags=TAG)
@@ -691,12 +830,12 @@ def farmer_loans(farm_id:int,user:CurrentUser,db:Db):
 @app.get('/finance/institutions/{institution_id}/loans',tags=TAG)
 def lender_loans(institution_id:int,user:CurrentUser,db:Db):
     member(db,institution_id,user.id)
-    return [view(db,loan) for loan in db.scalars(select(LoanAccount).where(LoanAccount.institution_id==institution_id).order_by(LoanAccount.id.desc())).all()]
+    return [view(db,loan) for loan in db.scalars(select(LoanAccount).where(LoanAccount.id.in_(scoped_loan_ids(institution_id,user.id))).order_by(LoanAccount.id.desc())).all()]
 
 @app.get('/finance/institutions/{institution_id}/portfolio',tags=TAG)
 def lender_portfolio(institution_id:int,user:CurrentUser,db:Db):
     member(db,institution_id,user.id)
-    loans=db.scalars(select(LoanAccount).where(LoanAccount.institution_id==institution_id)).all()
+    loans=db.scalars(select(LoanAccount).where(LoanAccount.id.in_(scoped_loan_ids(institution_id,user.id)))).all()
     today=date.today()
     totals={'disbursed':0,'collected':0,'outstanding_principal':0,'outstanding_interest':0,
             'outstanding_fees':0,'due_through_today':0,'overdue_amount':0,'overdue_loans':0}

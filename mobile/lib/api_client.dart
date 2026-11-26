@@ -16,7 +16,7 @@ class ApiException implements Exception {
 
 class ApiClient {
   ApiClient({required this.baseUrl, this.token, http.Client? client})
-      : _client = client ?? http.Client();
+    : _client = client ?? http.Client();
 
   String baseUrl;
   String? token;
@@ -36,8 +36,7 @@ class ApiClient {
     String path, {
     Map<String, dynamic>? body,
     Map<String, String>? query,
-  }) =>
-      request(method, path, body: body, query: query);
+  }) => request(method, path, body: body, query: query);
 
   Future<dynamic> request(
     String method,
@@ -86,24 +85,35 @@ class ApiClient {
       _uri('/farms/$farmId/evidence', query),
     );
     final extension = videoPath.toLowerCase().endsWith('.mp4') ? 'mp4' : 'webm';
-    request.headers['Content-Type'] =
-        extension == 'mp4' ? 'video/mp4' : 'video/webm';
+    request.headers['Content-Type'] = extension == 'mp4'
+        ? 'video/mp4'
+        : 'video/webm';
     if (token != null) request.headers['Authorization'] = 'Bearer $token';
     request.bodyBytes = await File(videoPath).readAsBytes();
     return _send(request, timeout: const Duration(minutes: 2));
   }
 
-  Future<int> uploadCollectionVideo(int loanId, String path, String capturedAt, String deviceRecordedAt) async {
-    final request = http.Request('POST', _uri('/finance/loans/$loanId/evidence', {
-      'record_type': 'repayment',
-      'captured_at': capturedAt,
-      'device_recorded_at': deviceRecordedAt,
-      'duration_seconds': '15',
-      'retry_upload': 'true',
-    }));
+  Future<int> uploadCollectionVideo(
+    int loanId,
+    String path,
+    String capturedAt,
+    String deviceRecordedAt, {
+    String kind = 'repayment',
+  }) async {
+    final request = http.Request(
+      'POST',
+      _uri('/finance/loans/$loanId/evidence', {
+        'record_type': kind,
+        'captured_at': capturedAt,
+        'device_recorded_at': deviceRecordedAt,
+        'duration_seconds': '15',
+        'retry_upload': 'true',
+      }),
+    );
     _addHeaders(request.headers, 'video/mp4');
     request.bodyBytes = await File(path).readAsBytes();
-    final result = await _send(request, timeout: const Duration(minutes: 2)) as Map;
+    final result =
+        await _send(request, timeout: const Duration(minutes: 2)) as Map;
     return result['id'] as int;
   }
 

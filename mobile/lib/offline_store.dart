@@ -11,9 +11,15 @@ class OfflineStore {
     final location = path.join(await getDatabasesPath(), 'aquafarm_mobile.db');
     _database = await openDatabase(
       location,
-      version: 2,
+      version: 3,
       onUpgrade: (db, oldVersion, _) async {
-        if (oldVersion < 2) await _createCollections(db);
+        if (oldVersion < 2) {
+          await _createCollections(db);
+        } else if (oldVersion < 3) {
+          await db.execute(
+            "ALTER TABLE pending_collections ADD COLUMN kind TEXT NOT NULL DEFAULT 'repayment'",
+          );
+        }
       },
       onCreate: (db, version) async {
         await _createCollections(db);
@@ -61,6 +67,7 @@ class OfflineStore {
       scope TEXT NOT NULL,
       loan_id INTEGER NOT NULL,
       amount TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'repayment',
       video_path TEXT NOT NULL,
       captured_at TEXT NOT NULL,
       device_recorded_at TEXT NOT NULL,
@@ -74,17 +81,32 @@ class OfflineStore {
   }
 
   Future<List<Map<String, Object?>>> pendingCollections(String scope) async =>
-      (await database).query('pending_collections',
-        where: 'scope = ?', whereArgs: [scope], orderBy: 'captured_at, collection_id');
+      (await database).query(
+        'pending_collections',
+        where: 'scope = ?',
+        whereArgs: [scope],
+        orderBy: 'captured_at, collection_id',
+      );
 
-  Future<void> updateCollection(String scope, String id, Map<String, Object?> values) async {
-    await (await database).update('pending_collections', values,
-      where: 'scope = ? AND collection_id = ?', whereArgs: [scope, id]);
+  Future<void> updateCollection(
+    String scope,
+    String id,
+    Map<String, Object?> values,
+  ) async {
+    await (await database).update(
+      'pending_collections',
+      values,
+      where: 'scope = ? AND collection_id = ?',
+      whereArgs: [scope, id],
+    );
   }
 
   Future<void> removeCollection(String scope, String id) async {
-    await (await database).delete('pending_collections',
-      where: 'scope = ? AND collection_id = ?', whereArgs: [scope, id]);
+    await (await database).delete(
+      'pending_collections',
+      where: 'scope = ? AND collection_id = ?',
+      whereArgs: [scope, id],
+    );
   }
 
   Future<int> queueRecord(Map<String, Object?> record) async {
@@ -142,18 +164,14 @@ class OfflineStore {
     required String expiresAt,
   }) async {
     final db = await database;
-    await db.insert(
-      'cached_challenges',
-      {
-        'id': id,
-        'owner_id': ownerId,
-        'unit_id': unitId,
-        'activity': activity,
-        'code': code,
-        'expires_at': expiresAt,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await db.insert('cached_challenges', {
+      'id': id,
+      'owner_id': ownerId,
+      'unit_id': unitId,
+      'activity': activity,
+      'code': code,
+      'expires_at': expiresAt,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<bool> hasUsableChallenge({
@@ -185,7 +203,8 @@ class OfflineStore {
     return db.transaction((transaction) async {
       final rows = await transaction.query(
         'cached_challenges',
-        where: 'owner_id = ? AND unit_id = ? AND activity = ? AND expires_at > ?',
+        where:
+            'owner_id = ? AND unit_id = ? AND activity = ? AND expires_at > ?',
         whereArgs: [
           ownerId,
           unitId,
@@ -207,7 +226,7 @@ class OfflineStore {
   }
 
   Map<String, Object?> decodeRecord(Map<String, Object?> row) => {
-        ...row,
-        'body': jsonDecode(row['body_json']! as String),
-      };
+    ...row,
+    'body': jsonDecode(row['body_json']! as String),
+  };
 }

@@ -24,6 +24,10 @@ def enabled(database_url: str | URL) -> bool:
     )
 
 
+def auto_approve_signup(database_url: str | URL) -> bool:
+    return os.environ.get('AQUAFARM_LOCAL_TEST_AUTO_APPROVE') == '1' and enabled(database_url)
+
+
 def seeded_account(db, user_id: int) -> bool:
     from .main import AuditLog
 

@@ -11,7 +11,7 @@
 | Evidence | The web recorder uses MediaRecorder with supported WebM or MP4 formats. The evidence API validates operations, restricts access and uses the configured evidence directory. | Test live preview and supported camera controls on physical devices. Verify retry behavior, resource cleanup and private storage persistence across hosted restarts. |
 | Staff | Phase 1B has scoped unit assignments, access history and a development-branch feeding-history view. Owner checks still guard operational uploads and record writes. | Finish scoped delegated writes, dedicated staff onboarding and attribution in Phase 1B before making Phase 1C forms available to staff. |
 
-The current production database is Neon PostgreSQL. Use isolated SQLite and PostgreSQL for development tests. Keep Flutter deferred as agreed. Preserve live records and publish to Render only after approval.
+The current production database is Neon PostgreSQL. Use isolated SQLite and PostgreSQL for development tests. Track native Flutter work separately in the master checklist. Preserve live records and publish to Render only after approval.
 
 ## Checklist
 
@@ -25,7 +25,7 @@ The current production database is Neon PostgreSQL. Use isolated SQLite and Post
 | Simplified feeding capture | Partially implemented |
 | Camera evidence and persistent storage | Partially implemented |
 | Staff permissions and operational attribution | Phase 1B dependency |
-| Hosted verification and deployment | Pending |
+| Hosted verification and deployment | Mobile drawer deployed and publicly checked. Signed-in device acceptance remains pending. |
 
 ## Mobile web acceptance checks
 

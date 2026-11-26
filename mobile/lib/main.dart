@@ -1,4 +1,5 @@
 import 'institution_workspace.dart';
+import 'collection_entry.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:geolocator/geolocator.dart';
 
@@ -378,6 +379,13 @@ class _MobileHomeState extends State<MobileHome> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text('Settings', style: Theme.of(context).textTheme.titleLarge),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                builder: (_) => CollectionDepositsPage(controller: widget.controller),
+              )),
+              icon: const Icon(Icons.account_balance_wallet_outlined),
+              label: const Text('Recorded deposits'),
+            ),
             PhoneVerificationPanel(controller: widget.controller),
             const SizedBox(height: 16),
             TextField(

@@ -156,6 +156,20 @@ Bank or financial institution and enter the corresponding local test username
 `admin`, `farmer`, or `bank`. Rerunning the seed command leaves existing test
 accounts and passwords intact and reports conflicting accounts.
 
+For simulated SMS in the isolated local portal, set
+`$env:AQUAFARM_LOCAL_TEST_SMS = '1'` in the backend terminal before starting
+Uvicorn. Request a code normally and enter `000002` for initial phone
+verification or institution SMS sign-in and first-time password setup. This
+setting is restricted to the designated local SQLite test database and
+does not apply to platform administrator or phone replacement verification.
+
+For Android emulator signup testing, set
+`$env:AQUAFARM_LOCAL_TEST_AUTO_APPROVE = '1'` in the isolated backend terminal
+before starting Uvicorn. In the debug app, set the backend address to
+`http://10.0.2.2:8001`. New farmer and processor registrations can open the
+workspace immediately. Use fictional account details. Existing pending accounts
+keep their approval status. Hosted signup is unaffected.
+
 ## Institution staff invitations
 
 Verified institution owners can use Institution Portal > Institution Management >
@@ -174,3 +188,5 @@ AQUAFARM_STAFF_SMTP_USERNAME and AQUAFARM_STAFF_SMTP_PASSWORD server-side.
 Give each page one primary purpose. Use concise module landings with links to dedicated entry, configuration, status, history and analytics views. Reuse existing histories and authoritative status fields, and distinguish overlapping views without duplicating records. Keep relevant actions discoverable with consistent terminology, back navigation and accessible responsive controls. Preserve form data after failed saves and protect unsaved changes where applicable. Refresh affected records and counts after confirmed mutations. Enforce account permissions and tenant boundaries in the backend, preserve existing data and links, and verify web and native mobile behavior separately.
 
 See [Phase 1D audit and acceptance checklist](PHASE_1D_CHECKLIST.md).
+
+See the [master completion checklist](MASTER_COMPLETION_CHECKLIST.md) for the consolidated prompt audit and open work across phases.

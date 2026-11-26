@@ -307,7 +307,9 @@ class _InstitutionCollections extends StatefulWidget {
 class _InstitutionCollectionsState extends State<_InstitutionCollections> {
   final _search = TextEditingController();
   late Future<Map> _result;
-  bool _customers = false;
+  String _view = 'today';
+  bool get _customers => _view != 'today';
+  bool get _deposits => _view == 'deposits';
   String _query = '';
   int _offset = 0;
   bool _syncing = false;
@@ -373,6 +375,7 @@ class _InstitutionCollectionsState extends State<_InstitutionCollections> {
           controller: widget.controller,
           scope: _scope,
           loan: loan,
+          deposit: _deposits,
         ),
       ),
     );
@@ -394,13 +397,17 @@ class _InstitutionCollectionsState extends State<_InstitutionCollections> {
 
   Future<Map> _load() async {
     final resource = _customers ? 'collection-customers' : 'collections';
-    final cacheKey = '$_offset:$_query';
+    final cacheKey = '$_view:$_offset:$_query';
     final customers = _customers;
     try {
       final result = await widget.controller.api.send(
         'GET',
         '/finance/institutions/${widget.institutionId}/$resource',
-        query: {'offset': '$_offset', if (customers) 'search': _query},
+        query: {
+          'offset': '$_offset',
+          if (customers) 'search': _query,
+          if (_deposits) 'deposits': 'true',
+        },
       ) as Map;
       if (customers) _cachedCustomers[cacheKey] = result;
       return result;
@@ -446,14 +453,15 @@ class _InstitutionCollectionsState extends State<_InstitutionCollections> {
             ),
           Padding(
             padding: const EdgeInsets.all(12),
-            child: SegmentedButton<bool>(
+            child: SegmentedButton<String>(
               segments: const [
-                ButtonSegment(value: false, label: Text('Today')),
-                ButtonSegment(value: true, label: Text('Customers')),
+                ButtonSegment(value: 'today', label: Text('Today')),
+                ButtonSegment(value: 'loans', label: Text('Loans')),
+                ButtonSegment(value: 'deposits', label: Text('Deposits')),
               ],
-              selected: {_customers},
+              selected: {_view},
               onSelectionChanged: (selection) => setState(() {
-                _customers = selection.single;
+                _view = selection.single;
                 _offset = 0;
                 _result = _load();
               }),
@@ -499,6 +507,9 @@ class _InstitutionCollectionsState extends State<_InstitutionCollections> {
                 }
                 final data = snapshot.data!;
                 final rows = data['items'] as List;
+                final standalone = _customers
+                    ? const []
+                    : (data['standalone_items'] as List? ?? const []);
                 return ListView(
                   children: [
                     if (data['offline'] == true)
@@ -511,12 +522,30 @@ class _InstitutionCollectionsState extends State<_InstitutionCollections> {
                           "${data['count']} posted repayments - GHS ${(data['total_ghs'] as num).toStringAsFixed(2)}",
                         ),
                       ),
-                    if (rows.isEmpty)
+                    for (final row in standalone)
+                      ListTile(
+                        title: Text(row['customer_name'] as String),
+                        subtitle: const Text('Standalone deposit'),
+                        trailing: Text(
+                          'GHS ${(row['deposited_ghs'] as num).toStringAsFixed(2)}',
+                        ),
+                        leading: IconButton(
+                          tooltip: 'Review deposit video',
+                          onPressed: () =>
+                              _playVideo(row['evidence_id'] as int),
+                          icon: const Icon(Icons.play_circle_outline),
+                        ),
+                      ),
+                    if (rows.isEmpty && standalone.isEmpty)
                       const ListTile(title: Text('No matching records.')),
                     for (final row in rows)
                       ListTile(
                         title: Text(row['customer_name'] as String),
-                        subtitle: Text(row['account_number'] as String),
+                        subtitle: Text(
+                          (row['deposited_ghs'] as num? ?? 0) > 0
+                              ? "${row['account_number']} | Deposit GHS ${(row['deposited_ghs'] as num).toStringAsFixed(2)}"
+                              : row['account_number'] as String,
+                        ),
                         onTap: _customers ? () => _collect(row as Map) : null,
                         leading: !_customers && row['evidence_id'] is int
                             ? IconButton(

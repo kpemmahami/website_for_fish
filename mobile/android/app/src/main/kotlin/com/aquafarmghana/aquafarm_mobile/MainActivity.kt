@@ -1,6 +1,7 @@
-﻿package com.aquafarmghana.aquafarm_mobile
+package com.aquafarmghana.aquafarm_mobile
 
 import android.app.Dialog
+import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.view.ViewGroup
 import android.widget.MediaController
@@ -21,7 +22,9 @@ class MainActivity : FlutterActivity() {
                 val url = call.argument<String>("url")
                 val token = call.argument<String>("token")
                 val uri = url?.let(Uri::parse)
-                if (uri?.scheme != "https" || token.isNullOrBlank()) {
+                val debugBuild = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+                val localEmulator = debugBuild && uri?.scheme == "http" && uri.host == "10.0.2.2"
+                if (uri == null || (uri.scheme != "https" && !localEmulator) || token.isNullOrBlank()) {
                     result.error("VIDEO_ACCESS", "An authenticated HTTPS session is required.", null)
                     return@setMethodCallHandler
                 }

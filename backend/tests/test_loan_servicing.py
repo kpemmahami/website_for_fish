@@ -1,5 +1,7 @@
 """Phase 0009 workflow, access restrictions, duplicate references, and balances."""
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta, timezone
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 from .test_api import client, upload_loan_video
 from .test_foundation import signup
@@ -60,8 +62,25 @@ def test_loan_servicing_permissions_and_balances():
     assert dis1.json()['status']=='awaiting_disbursement'
     assert client.post(f'/finance/loans/{loan_id}/disbursements',json=first,headers=lender).status_code==409
     assert client.post(f'/finance/loans/{loan_id}/repayments',json={'amount_ghs':'100.00','reference':'REPAY-1','transaction_date':today,'evidence_id':1},headers=lender).status_code==409
-    second={'amount_ghs':'6000.00','reference':'BANK-TRX-2','transaction_date':today,'evidence_id':upload_loan_video(lender,fid,'disbursement',loan_id)}
-    dis2=client.post(f'/finance/loans/{loan_id}/disbursements',json=second,headers=lender)
+    disbursement_path = f'/finance/loans/{loan_id}/disbursements'
+    competing = [
+        {'amount_ghs': '4000.00', 'reference': f'BANK-RACE-{index}', 'transaction_date': today,
+         'evidence_id': upload_loan_video(lender, fid, 'disbursement', loan_id)}
+        for index in range(2)
+    ]
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        attempts = [workers.submit(client.post, disbursement_path, json=entry, headers=lender)
+                    for entry in competing]
+        results = [attempt.result(timeout=15) for attempt in attempts]
+    assert sorted(response.status_code for response in results) == [201, 422]
+    rejected = next(response for response in results if response.status_code == 422)
+    assert rejected.json()['detail'] == 'Disbursement exceeds approved amount'
+    accepted = next(response for response in results if response.status_code == 201)
+    assert accepted.json()['disbursed_ghs'] == 8000
+    assert accepted.json()['undisbursed_ghs'] == 2000
+    final_tranche = {'amount_ghs': '2000.00', 'reference': 'BANK-TRX-2', 'transaction_date': today,
+                     'evidence_id': upload_loan_video(lender, fid, 'disbursement', loan_id)}
+    dis2 = client.post(disbursement_path, json=final_tranche, headers=lender)
     assert dis2.status_code==201,dis2.text
     assert dis2.json()['status']=='active'
     assert dis2.json()['disbursed_ghs']==10000
@@ -142,22 +161,93 @@ def test_loan_servicing_permissions_and_balances():
     assert client.post(video_path, params=params, content=video,
                        headers={**lender, 'Content-Type': 'video/webm'}).status_code == 409
     path = f'/finance/loans/{loan_id}/field-repayments'
-    payload = {'amount_ghs': '9800.00', 'transaction_date': today, 'evidence_id': final_video,
+    payload = {'amount_ghs': '9850.00', 'transaction_date': today, 'evidence_id': final_video,
                'collection_id': '9e97bd6f-86d1-4a35-90cb-e47f96ac5243', 'customer_consented': True}
     assert client.post(path, json={**payload, 'customer_consented': False}, headers=officer).status_code == 422
     assert client.post(path, json=payload, headers=reviewer).status_code == 404
-    final = client.post(path, json=payload, headers=officer)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        requests = [workers.submit(client.post, path, json=payload, headers=officer) for _ in range(2)]
+        final, concurrent_retry = [request.result(timeout=15) for request in requests]
     assert final.status_code == 200, final.text
-    assert final.json()['amount_ghs'] == 9800
+    assert concurrent_retry.status_code == 200, concurrent_retry.text
+    assert final.json() == concurrent_retry.json()
+    assert final.json()['amount_ghs'] == 9850
+    assert final.json()['applied_to_loan_ghs'] == 9800
+    assert final.json()['deposited_ghs'] == 50
+    balances = client.get('/finance/my-collection-deposits', headers=farmer).json()
+    assert balances == [{'institution_id': iid, 'institution': 'Servicing Rural Bank', 'recorded_deposits_ghs': 50}]
+    assert client.get('/finance/my-collection-deposits', headers=stranger).json() == []
     assert client.post(path, json=payload, headers=officer).json() == final.json()
     assert client.post(path, json=payload, headers=lender).status_code == 409
     assert client.post(path, json={**payload, 'amount_ghs': '9700.00'}, headers=officer).status_code == 409
     assert client.get(f'/finance/loans/{loan_id}', headers=officer).json()['status'] == 'repaid'
+    posted = client.get(daily, headers=officer).json()
+    assert posted['count'] == 2
+    assert posted['total_ghs'] == 11300
+    assert posted['deposited_ghs'] == 50
+    assert posted['total_received_ghs'] == 11350
+    matching = [row for row in posted['items'] if row['reference'] == final.json()['reference']]
+    assert len(matching) == 1
+    assert matching[0]['evidence_id'] == final_video
+    protected_video = f'/finance/loan-evidence/{final_video}/video'
+    assert client.get(protected_video, headers=stranger).status_code == 404
+    download = client.get(protected_video, headers=officer)
+    assert download.status_code == 200
+    assert download.content == video
     final_totals = client.get(disbursements, headers=lender).json()['totals']
     assert final_totals == {
         'disbursed_ghs': 10000, 'recovered_ghs': 11300,
         'principal_recovered_ghs': 10000, 'principal_recovery_percent': 100,
     }
+
+    available = client.get(customers, params={'deposits': True}, headers=officer)
+    assert available.status_code == 200, available.text
+    assert [item['loan_id'] for item in available.json()['items']] == [loan_id]
+    assert client.get(customers, headers=officer).json()['items'] == []
+    deposit_video = client.post(video_path, params={**params, 'record_type': 'deposit'},
+                                content=video + b'-deposit', headers=video_headers)
+    assert deposit_video.status_code == 201, deposit_video.text
+    deposit_path = f'/finance/loans/{loan_id}/field-deposits'
+    deposit_payload = {**payload, 'amount_ghs': '25.00', 'evidence_id': deposit_video.json()['id'],
+                       'collection_id': str(uuid4())}
+    assert client.post(deposit_path, json=deposit_payload, headers=reviewer).status_code == 404
+    receipt = client.post(deposit_path, json=deposit_payload, headers=officer)
+    assert receipt.status_code == 200, receipt.text
+    assert receipt.json()['applied_to_loan_ghs'] == 0
+    assert receipt.json()['deposited_ghs'] == 25
+    assert client.post(deposit_path, json=deposit_payload, headers=officer).json() == receipt.json()
+    assert client.get(disbursements, headers=lender).json()['totals'] == final_totals
+    assert client.get('/finance/my-collection-deposits', headers=farmer).json()[0]['recorded_deposits_ghs'] == 75
+    posted = client.get(daily, headers=officer).json()
+    assert posted['standalone_count'] == 1
+    assert posted['total_ghs'] == 11300
+    assert posted['deposited_ghs'] == 75
+    assert posted['total_received_ghs'] == 11375
+
+
+    branch_root = f'/finance/institutions/{iid}/branches'
+    branch = client.post(branch_root, headers=lender, json={
+        'code': 'RECOVERY', 'name': 'Recovery branch', 'address': 'Tamale, Ghana',
+    }).json()
+    officer_id = client.get('/auth/me', headers=officer).json()['id']
+    assignment = f'/finance/institutions/{iid}/staff/{officer_id}/branch'
+    assert client.put(assignment, json={'branch_id': branch['id']}, headers=officer).status_code == 404
+    assert client.put(assignment, json={'branch_id': branch['id']}, headers=lender).status_code == 200
+    assert client.get(f'/finance/loans/{loan_id}', headers=officer).status_code == 404
+    assert client.get(protected_video, headers=officer).status_code == 404
+    assert client.get(daily, headers=officer).json()['total_received_ghs'] == 0
+    assert client.get(f'/finance/institutions/{iid}/applications', headers=officer).json() == []
+    application_branch = f'/finance/institutions/{iid}/applications/{aid}/branch'
+    assert client.put(application_branch, json={'branch_id': branch['id']}, headers=lender).status_code == 200
+    assert client.get(f'/finance/loans/{loan_id}', headers=officer).status_code == 200
+    assert client.get(protected_video, headers=officer).status_code == 200
+    assert client.get(daily, headers=officer).json()['total_received_ghs'] == 11375
+    assert client.patch(branch_root+'/'+str(branch['id']), headers=lender, json={
+        'name': branch['name'], 'address': branch['address'], 'active': False,
+    }).status_code == 200
+    assert client.get(f'/finance/loans/{loan_id}', headers=officer).status_code == 404
+    assert client.get(f'/finance/loans/{loan_id}', headers=lender).status_code == 200
+
 
 def test_custom_schedule_reminders_and_portfolio_metrics():
     farmer=signup('custom-schedule-farmer@example.com')

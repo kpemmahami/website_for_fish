@@ -73,7 +73,7 @@ def list_staff(institution_id: int, user: CurrentUser, db: Db):
     ).order_by(AuditLog.id.desc()).limit(100))
     return {
         'staff': [{'user_id': person.id, 'full_name': person.full_name, 'email': person.email,
-                   'phone_number': person.phone_number, 'role': row.role, 'status': row.status,
+                   'phone_number': person.phone_number, 'role': row.role, 'status': row.status, 'branch_id': row.branch_id,
                    'department': row.department, 'job_title': row.job_title, 'created_at': row.created_at}
                   for row, person in staff],
         'activity': [{'actor_id': row.actor_id, 'action': row.action, 'details': row.details,

@@ -61,3 +61,32 @@ def test_institution_staff_lifecycle():
     assert client.get('/finance/institutions/mine', headers=existing).json() == []
     assert client.get(root, headers=owner).json()['activity']
     assert client.get('/auth/me', headers=login('farmer', 'existing-bank-staff@example.com')).status_code == 200
+
+
+def test_branch_directory_preserves_tenant_boundaries():
+    owner, registration = register_institution('branch-owner@example.com', {
+        'name': 'Branch Test Bank', 'institution_type': 'bank', 'account_number': 'BRANCH-TEST',
+    })
+    other, other_registration = register_institution('other-branch-owner@example.com', {
+        'name': 'Other Branch Test Bank', 'institution_type': 'bank', 'account_number': 'BRANCH-OTHER',
+    })
+    institution_id = registration.json()['id']
+    other_id = other_registration.json()['id']
+    admin = admin_headers()
+    for bank in (institution_id, other_id):
+        assert client.post(f'/finance/institutions/{bank}/verify', headers=admin).status_code == 200
+    root = f'/finance/institutions/{institution_id}/branches'
+    other_root = f'/finance/institutions/{other_id}/branches'
+    payload = {'code': 'n-01', 'name': 'Northern branch', 'address': 'Tamale, Ghana'}
+    assert client.post(root, json=payload, headers=other).status_code == 404
+    created = client.post(root, json=payload, headers=owner)
+    assert created.status_code == 201, created.text
+    branch = created.json()
+    assert branch['code'] == 'N-01'
+    assert client.post(root, json={**payload, 'code': 'N-01'}, headers=owner).status_code == 409
+    assert client.post(other_root, json=payload, headers=other).status_code == 201
+    edited = {'name': branch['name'], 'address': 'Tamale Central, Ghana', 'active': False}
+    assert client.patch(other_root+'/'+str(branch['id']), json=edited, headers=other).status_code == 404
+    assert client.patch(root+'/'+str(branch['id']), json=edited, headers=owner).status_code == 200
+    assert client.get(root, headers=other).status_code == 404
+    assert client.get(root, headers=owner).json() == [{**branch, **edited}]

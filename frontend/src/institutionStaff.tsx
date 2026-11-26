@@ -15,6 +15,7 @@ export function InstitutionStaff({id, name, api}:{id:number,name:string,api:Api}
   const root='/finance/institutions/'+id+'/staff';
   const [view,setView]=useState('Staff Management');
   const [data,setData]=useState<Data|null>(null);
+  const [branches,setBranches]=useState<{id:number;name:string;active:boolean}[]>([]);
   const [form,setForm]=useState(emptyForm);
   const [showForm,setShowForm]=useState(false);
   const [search,setSearch]=useState('');
@@ -27,6 +28,12 @@ export function InstitutionStaff({id, name, api}:{id:number,name:string,api:Api}
     load().then(result=>{if(current)setData(result)}).catch(problem=>{if(current)setError(String(problem))});
     return ()=>{current=false};
   },[load]);
+  useEffect(()=>{
+    let current=true;
+    api('/finance/institutions/'+id+'/branches').then(result=>{if(current)setBranches(result)})
+      .catch(problem=>{if(current)setError(String(problem))});
+    return ()=>{current=false};
+  },[api,id]);
   async function save(path:string, body:Data, method='POST'){
     setBusy(true);setError('');setStatus('');
     try{
@@ -69,17 +76,27 @@ export function InstitutionStaff({id, name, api}:{id:number,name:string,api:Api}
         <label className="field"><span>Temporary password</span><input type="password" required minLength={8} maxLength={128} autoComplete="new-password" value={form.password} onChange={event=>setForm({...form,password:event.target.value})}/></label>
         <button className="primary" disabled={busy}>Create staff account</button>
       </form>}
+      {!showForm&&<>
       <label className="field"><span>Search staff</span><input type="search" value={search} onChange={event=>setSearch(event.target.value)}/></label>
       {data?.staff.filter((row:Data)=>(row.full_name+' '+row.email+' '+row.status).toLowerCase().includes(search.trim().toLowerCase())).map((row:Data)=><div className="item" key={row.user_id}>
         <b>{row.full_name} · {roleLabel(row.role)}</b><small>{row.email} · {row.status} · Added {row.created_at.slice(0,10)}</small>
         {(row.phone_number||row.department||row.job_title)&&<small>{[row.phone_number,row.department,row.job_title].filter(Boolean).join(' · ')}</small>}
         {row.role!=='owner'&&<div className="farmactions">
+          <label className="field"><span>Branch for {row.full_name}</span>
+            <select value={row.branch_id??''} disabled={busy} onChange={event=>void save('/'+row.user_id+'/branch',
+              {branch_id:event.target.value?Number(event.target.value):null},'PUT')}>
+              <option value="">Institution-wide access</option>
+              {branches.filter(branch=>branch.active||branch.id===row.branch_id).map(branch=>
+                <option value={branch.id} key={branch.id} disabled={!branch.active}>{branch.name}</option>)}
+            </select>
+          </label>
           <label className="field"><span>Edit role for {row.full_name}</span><select value={row.role} disabled={busy} onChange={event=>void save('/'+row.user_id,{role:event.target.value},'PATCH')}>{roleOptions.map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>
           {row.status==='active'&&<button className="outline small" disabled={busy} onClick={()=>void save('/'+row.user_id,{status:'suspended'},'PATCH')}>Suspend</button>}
           {row.status==='suspended'&&<button className="outline small" disabled={busy} onClick={()=>void save('/'+row.user_id,{status:'active'},'PATCH')}>Reactivate</button>}
           {row.status!=='removed'&&<button className="outline small" disabled={busy} onClick={()=>{if(window.confirm('Remove access for '+row.full_name+'?'))void save('/'+row.user_id,{status:'removed'},'PATCH')}}>Remove access</button>}
         </div>}
       </div>)}
+      </>}
     </>}
     {view==='Staff Activity Logs'&&(data?.activity.length?data.activity.map((row:Data,index:number)=><div className="item" key={index}><b>{row.action.replace(/_/g,' ')}</b><small>{row.created_at} · User #{row.actor_id}</small><small>{row.details}</small></div>):data&&<p className="empty">No staff activity recorded.</p>)}
     {!data&&!error&&<p role="status">Loading staff information…</p>}

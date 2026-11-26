@@ -396,7 +396,10 @@ def duplicate_email(error: IntegrityError) -> bool:
 @app.post('/auth/register', response_model=UserOut, status_code=201)
 @app.post('/auth/farmer/register', response_model=UserOut, status_code=201)
 def register(data: FarmerRegister, db: Db):
-    user = new_user(data, 'pending_farmer')
+    from .development import auto_approve_signup
+
+    test_signup = auto_approve_signup(DATABASE_URL)
+    user = new_user(data, 'farmer' if test_signup else 'pending_farmer')
     try:
         if db.scalar(select(User.id).where(User.email == user.email)) is not None:
             raise HTTPException(409, 'Email already registered')
@@ -406,6 +409,8 @@ def register(data: FarmerRegister, db: Db):
         if data.business_type != 'farmer':
             from .processing import ProcessingBusiness
             db.add(ProcessingBusiness(owner_id=user.id,name=data.full_name,business_type=data.business_type))
+        if test_signup:
+            audit(db, user, 'auto_approve_local_test_signup', 'farmer_account', user.id)
         response = UserOut.model_validate(user)
         db.commit()
     except SQLAlchemyError as error:
@@ -731,6 +736,8 @@ from . import phone_verification
 from . import farm_staff
 
 from . import institution_staff
+from . import institution_branches
+from . import institution_accounting
 
 from . import feeding_sessions
 

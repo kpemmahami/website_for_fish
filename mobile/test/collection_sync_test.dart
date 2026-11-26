@@ -71,4 +71,24 @@ void main() {
     expect(requests, 2);
     controller.dispose();
   });
+
+  test(
+    'standalone deposits sync through the separate deposit endpoint',
+    () async {
+      final store = MemoryCollections();
+      store.row['kind'] = 'deposit';
+      final controller = AppController(store)..token = 'test-token';
+      controller.api = ApiClient(
+        baseUrl: 'https://example.com',
+        token: controller.token,
+        client: MockClient((request) async {
+          expect(request.url.path, '/finance/loans/4/field-deposits');
+          return http.Response('{"id":8}', 200);
+        }),
+      );
+      expect(await syncCollections(controller, 'test-scope'), 1);
+      expect(store.removed, isTrue);
+      controller.dispose();
+    },
+  );
 }
