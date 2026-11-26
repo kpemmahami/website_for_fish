@@ -516,7 +516,7 @@ def test_fixed_sms_code_requires_explicit_isolated_test_database(monkeypatch):
 
     with patch.object(phone_verification, 'save_challenge') as save, patch.object(phone_verification, 'send_code') as send:
         phone_verification.issue_phone_code(None, None, '+233245550100', 'test')
-        assert save.call_args.args[3] == '000002'
+        assert save.call_args.args[3] == '000000'
         send.assert_not_called()
     monkeypatch.delenv('AQUAFARM_LOCAL_TEST_SMS')
     assert not phone_verification.local_test_sms_enabled()

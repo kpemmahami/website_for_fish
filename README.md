@@ -158,7 +158,7 @@ accounts and passwords intact and reports conflicting accounts.
 
 For simulated SMS in the isolated local portal, set
 `$env:AQUAFARM_LOCAL_TEST_SMS = '1'` in the backend terminal before starting
-Uvicorn. Request a code normally and enter `000002` for initial phone
+Uvicorn. Request a code normally and enter `000000` for initial phone
 verification or institution SMS sign-in and first-time password setup. This
 setting is restricted to the designated local SQLite test database and
 does not apply to platform administrator or phone replacement verification.

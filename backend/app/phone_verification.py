@@ -62,7 +62,7 @@ def local_test_sms_enabled() -> bool:
 
 def issue_phone_code(db, account, phone, description, *, purpose=None, allow_local_test=True):
     local_test = allow_local_test and local_test_sms_enabled()
-    code = '000002' if local_test else f'{secrets.randbelow(1_000_000):06d}'
+    code = '000000' if local_test else f'{secrets.randbelow(1_000_000):06d}'
     save_challenge(db, account, phone, code, purpose=purpose)
     if not local_test:
         send_code(phone, code, description)
