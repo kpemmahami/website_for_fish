@@ -109,9 +109,12 @@ def test_loan_servicing_permissions_and_balances():
     decision_path = review_path+f"/{prepared.json()['id']}/decision"
     decision = {'decision': 'approved', 'reason': 'Checked external settlement'}
     assert client.post(decision_path, json=decision, headers=officer).status_code == 404
-    approved = client.post(decision_path, json=decision, headers=lender)
-    assert approved.status_code == 200, approved.text
-    assert client.post(decision_path, json=decision, headers=lender).json() == approved.json()
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        approvals = [workers.submit(client.post, decision_path, json=decision, headers=lender)
+                     for _ in range(2)]
+        approved, duplicate_approval = [attempt.result(timeout=15) for attempt in approvals]
+    assert approved.status_code == duplicate_approval.status_code == 200
+    assert duplicate_approval.json() == approved.json()
     assert client.get(queue_path, headers=lender).json()['items'] == []
     dis2=client.get(f'/finance/loans/{loan_id}', headers=lender)
     assert dis2.json()['status']=='active'
