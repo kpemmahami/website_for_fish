@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import update, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func, or_
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import Base, app, Db, CurrentUser, Farm, User, owned_farm, audit
-from .lending import Institution, LoanApplication, LoanDecision, application_scope, require_application_scope, member, ghs
+from .lending import Institution, InstitutionMember, LoanApplication, LoanDecision, application_scope, require_application_scope, member, ghs
 
 TAG = ['Loan disbursement and recovery (manual ledger)']
 def utcnow(): return datetime.now(timezone.utc)
@@ -52,6 +52,23 @@ class LoanDisbursement(Base):
     disbursed_on: Mapped[date] = mapped_column(Date, nullable=False)
     recorded_by: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+class DisbursementReview(Base):
+    __tablename__ = 'loan_disbursement_reviews'
+    __table_args__ = (UniqueConstraint('loan_id', 'reference', name='uq_disbursement_review_reference'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    loan_id: Mapped[int] = mapped_column(ForeignKey('loan_accounts.id'))
+    amount_pesewas: Mapped[int] = mapped_column(Integer)
+    reference: Mapped[str] = mapped_column(String(100))
+    disbursed_on: Mapped[date] = mapped_column(Date)
+    evidence_id: Mapped[int] = mapped_column(ForeignKey('loan_evidence.id'), unique=True)
+    prepared_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    status: Mapped[str] = mapped_column(String(16), default='pending')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    decided_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(String(500))
+
 
 class LoanInstallment(Base):
     __tablename__='loan_installments'
@@ -341,9 +358,12 @@ def view(db,loan):
     expected_interest = scheduled_i or scheduled_interest(loan.approved_pesewas,loan.annual_flat_rate_bps,loan.term_months)
     total_contract = loan.approved_pesewas + expected_interest + fees
     current_balance = disbursed-paid_p+scheduled_i-paid_i+fees-fees_paid
+    reserved = pending_disbursements(db, loan.id) if loan.status == 'awaiting_disbursement' else 0
     return {'id':loan.id,'application_id':loan.application_id,'farm_id':loan.farm_id,'institution_id':loan.institution_id,
         'status':loan.status,'currency':'GHS','approved_ghs':ghs(loan.approved_pesewas),
         'disbursed_ghs':ghs(disbursed),'undisbursed_ghs':ghs(loan.approved_pesewas-disbursed),
+        'pending_disbursement_ghs':ghs(reserved),
+        'available_for_disbursement_ghs':ghs(max(0,loan.approved_pesewas-disbursed-reserved)),
         'principal_repaid_ghs':ghs(paid_p),'interest_repaid_ghs':ghs(paid_i),
         'outstanding_principal_ghs':ghs(disbursed-paid_p),
         'scheduled_interest_ghs':ghs(scheduled_i), 'outstanding_scheduled_interest_ghs':ghs(scheduled_i-paid_i),
@@ -502,31 +522,179 @@ def respond_to_offer(loan_id: int, data: LoanOfferResponse, user: CurrentUser, d
     return view(db, loan)
 
 
-@app.post('/finance/loans/{loan_id}/disbursements',status_code=201,tags=TAG)
-def record_disbursement(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):
-    loan=loan_for_lender(db,loan_id,user,'disburse')
-    # Serialize writes before checking the remaining authorization on SQLite and PostgreSQL.
+def lock_disbursement_policy(db, institution_id):
+    db.execute(update(Institution).where(Institution.id == institution_id).values(status=Institution.status))
+    institution = db.get(Institution, institution_id)
+    db.refresh(institution)
+    return institution
+
+
+def lock_disbursement_loan(db, loan):
     db.execute(update(LoanAccount).where(LoanAccount.id == loan.id).values(status=LoanAccount.status))
     db.refresh(loan)
-    if loan.status!='awaiting_disbursement': raise HTTPException(409,'Loan not awaiting disbursement')
-    if db.scalar(select(LoanDisbursement.id).where(LoanDisbursement.loan_id==loan.id,LoanDisbursement.reference==data.reference)) is not None:
-        raise HTTPException(409,'Disbursement reference already recorded')
-    if data.transaction_date>date.today(): raise HTTPException(422,'Future disbursement cannot be recorded')
-    amount=cents(data.amount_ghs)
-    disbursed,_,_,_=sums(db,loan)
-    if amount>loan.approved_pesewas-disbursed: raise HTTPException(422,'Disbursement exceeds approved amount')
-    evidence=required_loan_evidence(db,data.evidence_id,loan.farm_id,'disbursement',user.id,loan.id)
-    transaction=LoanDisbursement(loan_id=loan.id,amount_pesewas=amount,reference=data.reference,
-        disbursed_on=data.transaction_date,recorded_by=user.id)
-    db.add(transaction);db.flush()
-    evidence.record_id=transaction.id
+
+
+def pending_disbursements(db, loan_id):
+    return db.scalar(select(func.coalesce(func.sum(DisbursementReview.amount_pesewas), 0)).where(
+        DisbursementReview.loan_id == loan_id, DisbursementReview.status == 'pending',
+    ))
+
+
+def check_disbursement(db, loan, amount, reference, disbursed_on, *, reserved=0):
+    if loan.status != 'awaiting_disbursement':
+        raise HTTPException(409, 'Loan not awaiting disbursement')
+    if db.scalar(select(LoanDisbursement.id).where(
+        LoanDisbursement.loan_id == loan.id, LoanDisbursement.reference == reference,
+    )) is not None:
+        raise HTTPException(409, 'Disbursement reference already recorded')
+    if disbursed_on > utcnow().date():
+        raise HTTPException(422, 'Future disbursement cannot be recorded')
+    disbursed, _, _, _ = sums(db, loan)
+    if amount > loan.approved_pesewas - disbursed - reserved:
+        raise HTTPException(422, 'Disbursement exceeds approved amount')
+    return disbursed
+
+
+def post_disbursement(db, loan, amount, reference, disbursed_on, evidence, recorded_by, actor, disbursed):
+    transaction = LoanDisbursement(loan_id=loan.id, amount_pesewas=amount, reference=reference,
+                                  disbursed_on=disbursed_on, recorded_by=recorded_by)
+    db.add(transaction)
     db.flush()
-    if disbursed+amount==loan.approved_pesewas:
-        make_schedule(db,loan);loan.status='active'
-    audit(db,user,'disburse','loan_account',loan.id,json.dumps({
-        'amount_ghs':float(data.amount_ghs),'reference':data.reference,'evidence_id':evidence.id,
-    }));db.commit()
-    return view(db,loan)
+    evidence.record_id = transaction.id
+    if disbursed + amount == loan.approved_pesewas:
+        db.flush()
+        make_schedule(db, loan)
+        loan.status = 'active'
+    audit(db, actor, 'disburse', 'loan_account', loan.id, json.dumps({
+        'amount_ghs': ghs(amount), 'reference': reference, 'evidence_id': evidence.id,
+        'prepared_by': recorded_by,
+    }))
+
+
+@app.post('/finance/loans/{loan_id}/disbursements', status_code=201, tags=TAG)
+def record_disbursement(loan_id: int, data: TransactionIn, user: CurrentUser, db: Db):
+    loan = loan_for_lender(db, loan_id, user, 'disburse')
+    if lock_disbursement_policy(db, loan.institution_id).require_disbursement_approval:
+        raise HTTPException(409, 'This institution requires independent disbursement approval')
+    lock_disbursement_loan(db, loan)
+    amount = cents(data.amount_ghs)
+    disbursed = check_disbursement(db, loan, amount, data.reference, data.transaction_date)
+    evidence = required_loan_evidence(db, data.evidence_id, loan.farm_id, 'disbursement', user.id, loan.id)
+    post_disbursement(db, loan, amount, data.reference, data.transaction_date, evidence, user.id, user, disbursed)
+    db.commit()
+    return view(db, loan)
+
+
+class DisbursementPolicyIn(BaseModel):
+    required: bool
+
+
+@app.put('/finance/institutions/{institution_id}/disbursement-policy', tags=TAG)
+def update_disbursement_policy(institution_id: int, data: DisbursementPolicyIn, user: CurrentUser, db: Db):
+    member(db, institution_id, user.id, 'manage_staff')
+    institution = lock_disbursement_policy(db, institution_id)
+    if not data.required and db.scalar(select(DisbursementReview.id)
+        .join(LoanAccount, LoanAccount.id == DisbursementReview.loan_id)
+        .where(LoanAccount.institution_id == institution_id, DisbursementReview.status == 'pending').limit(1)):
+        raise HTTPException(409, 'Decide all pending disbursements before disabling this policy')
+    if institution.require_disbursement_approval != data.required:
+        institution.require_disbursement_approval = data.required
+        audit(db, user, 'change_disbursement_policy', 'finance_institution', institution_id,
+              json.dumps({'required': data.required}))
+    db.commit()
+    return {'required': institution.require_disbursement_approval}
+
+
+def review_view(review):
+    return {'id': review.id, 'loan_id': review.loan_id, 'reference': review.reference,
+            'amount_ghs': ghs(review.amount_pesewas), 'disbursed_on': review.disbursed_on,
+            'evidence_id': review.evidence_id, 'prepared_by': review.prepared_by,
+            'status': review.status, 'created_at': review.created_at,
+            'decided_by': review.decided_by, 'decided_at': review.decided_at, 'reason': review.reason}
+
+
+@app.get('/finance/institutions/{institution_id}/disbursement-reviews', tags=TAG)
+def disbursement_review_queue(institution_id: int, user: CurrentUser, db: Db,
+                              status: Literal['pending','approved','rejected'] = 'pending',
+                              offset: int = Query(0, ge=0)):
+    member(db, institution_id, user.id, 'manage_staff')
+    rows = db.scalars(select(DisbursementReview).join(LoanAccount, LoanAccount.id == DisbursementReview.loan_id)
+        .where(LoanAccount.institution_id == institution_id, DisbursementReview.status == status)
+        .order_by(DisbursementReview.id.desc()).offset(offset).limit(26)).all()
+    return {'items': [review_view(row) for row in rows[:25]], 'has_more': len(rows) > 25}
+
+
+@app.post('/finance/loans/{loan_id}/disbursement-reviews', status_code=201, tags=TAG)
+def prepare_disbursement(loan_id: int, data: TransactionIn, user: CurrentUser, db: Db):
+    loan = loan_for_lender(db, loan_id, user, 'disburse')
+    if not lock_disbursement_policy(db, loan.institution_id).require_disbursement_approval:
+        raise HTTPException(409, 'Independent disbursement approval is disabled')
+    role = db.scalar(select(InstitutionMember.role).where(
+        InstitutionMember.institution_id == loan.institution_id, InstitutionMember.user_id == user.id,
+    ))
+    if role == 'owner':
+        raise HTTPException(403, 'A disbursement officer must prepare this record for the owner to review')
+    lock_disbursement_loan(db, loan)
+    amount = cents(data.amount_ghs)
+    existing = db.scalar(select(DisbursementReview).where(
+        DisbursementReview.loan_id == loan.id, DisbursementReview.reference == data.reference,
+    ))
+    if existing:
+        if (existing.amount_pesewas != amount or existing.evidence_id != data.evidence_id
+                or existing.prepared_by != user.id or existing.disbursed_on != data.transaction_date):
+            raise HTTPException(409, 'Disbursement reference already prepared')
+        return review_view(existing)
+    check_disbursement(db, loan, amount, data.reference, data.transaction_date,
+                       reserved=pending_disbursements(db, loan.id))
+    evidence = required_loan_evidence(db, data.evidence_id, loan.farm_id, 'disbursement', user.id, loan.id)
+    if db.scalar(select(DisbursementReview.id).where(DisbursementReview.evidence_id == evidence.id)) is not None:
+        raise HTTPException(409, 'Evidence already attached to a disbursement review')
+    review = DisbursementReview(loan_id=loan.id, amount_pesewas=amount, reference=data.reference,
+                                disbursed_on=data.transaction_date, evidence_id=evidence.id, prepared_by=user.id)
+    db.add(review)
+    db.flush()
+    audit(db, user, 'prepare_disbursement', 'loan_disbursement_review', review.id)
+    db.commit()
+    return review_view(review)
+
+
+class DisbursementDecision(BaseModel):
+    decision: Literal['approved','rejected']
+    reason: str = Field(min_length=3, max_length=500, pattern=r'\S')
+
+
+@app.post('/finance/loans/{loan_id}/disbursement-reviews/{review_id}/decision', tags=TAG)
+def decide_disbursement(loan_id: int, review_id: int, data: DisbursementDecision, user: CurrentUser, db: Db):
+    loan = loan_for_lender(db, loan_id, user, 'manage_staff')
+    lock_disbursement_policy(db, loan.institution_id)
+    lock_disbursement_loan(db, loan)
+    review = db.scalar(select(DisbursementReview).where(
+        DisbursementReview.id == review_id, DisbursementReview.loan_id == loan.id,
+    ))
+    if review is None:
+        raise HTTPException(404, 'Disbursement review not found')
+    if review.prepared_by == user.id:
+        raise HTTPException(403, 'The preparing officer cannot decide this disbursement')
+    if review.status != 'pending':
+        if review.status == data.decision and review.decided_by == user.id and review.reason == data.reason.strip():
+            return review_view(review)
+        raise HTTPException(409, 'Disbursement already decided')
+    if data.decision == 'approved':
+        disbursed = check_disbursement(db, loan, review.amount_pesewas, review.reference, review.disbursed_on,
+                                       reserved=pending_disbursements(db, loan.id) - review.amount_pesewas)
+        evidence = db.get(LoanEvidence, review.evidence_id)
+        if evidence is None or evidence.record_id is not None:
+            raise HTTPException(409, 'Disbursement evidence is unavailable')
+        post_disbursement(db, loan, review.amount_pesewas, review.reference, review.disbursed_on,
+                          evidence, review.prepared_by, user, disbursed)
+    review.status = data.decision
+    review.reason = data.reason.strip()
+    review.decided_by = user.id
+    review.decided_at = utcnow()
+    audit(db, user, data.decision, 'loan_disbursement_review', review.id, json.dumps({'reason': review.reason}))
+    db.commit()
+    return review_view(review)
+
 
 @app.post('/finance/loans/{loan_id}/repayments',status_code=201,tags=TAG)
 def record_repayment(loan_id:int,data:TransactionIn,user:CurrentUser,db:Db):

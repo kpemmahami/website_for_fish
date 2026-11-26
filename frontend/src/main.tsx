@@ -1,3 +1,4 @@
+import {DisbursementReviews} from './disbursementReviews';
 import {InstitutionPeriods} from './institutionPeriods';
 import {InstitutionLedger} from './institutionLedger';
 import {InstitutionAccounts} from './institutionAccounts';
@@ -286,6 +287,7 @@ function App(){
    portfolio: 'Loan accounts',
    staff: 'Institution staff',
    branches: 'Institution branches',
+   'disbursement-approvals': 'Disbursement approvals',
    accounting: 'Chart of accounts',
    periods: 'Accounting periods',
    journals: 'Posted journals',
@@ -1157,12 +1159,15 @@ function App(){
      let evidenceId=transactionEvidenceId;
      if(evidenceId===null){const uploaded=await uploadLoanEvidence(kind==='disbursements'?'disbursement':'repayment',transactionVideo,id,page==='collections');evidenceId=uploaded.id;setTransactionEvidenceId(evidenceId)}
      const payment={amount_ghs:form.loan_amount_ghs,transaction_date:form.loan_transaction_date,evidence_id:evidenceId};
-     if(page==='collections'){
+     const needsReview=kind==='disbursements'&&Boolean(selectedInstitution?.require_disbursement_approval);
+     if(needsReview){
+       await json(`/finance/loans/${id}/disbursement-reviews`,{...payment,reference:form.loan_reference});
+     }else if(page==='collections'){
        await json(`/finance/loans/${id}/field-repayments`,{...payment,collection_id:form.collection_id,customer_consented:true});
      }else{
        await json(`/finance/loans/${id}/${kind}`,{...payment,reference:form.loan_reference});
      }
-     setNotice(kind==='disbursements'?'Disbursement recorded with video evidence.':'Repayment recorded with video evidence.');
+     setNotice(needsReview?'Disbursement submitted for independent approval.':kind==='disbursements'?'Disbursement recorded with video evidence.':'Repayment recorded with video evidence.');
      setForm({});setTransactionVideo(null);setTransactionEvidenceId(null);setTransactionRecorderKey(key=>key+1);
      await Promise.all([loadFarm(),loadLender()]);
      if(page==='collections'||page==='disbursements')setSelectedLoan(null);else await openLoan(id)
@@ -1200,7 +1205,8 @@ function App(){
  const institutionRole=selectedInstitution?.role;
  const canAppraise=['owner','reviewer','credit_manager'].includes(institutionRole);
  const canAssess=canAppraise||institutionRole==='loan_officer';
- const canDisburse=['owner','officer','disbursement'].includes(institutionRole);
+ const canDisburse=['owner','officer','disbursement'].includes(institutionRole)&&
+   !(institutionRole==='owner'&&selectedInstitution?.require_disbursement_approval);
  const canRepay=['owner','officer','collections'].includes(institutionRole);
  const visibleLenderApplications = lenderApps.filter(application =>
    lenderSection === 'pending' ? !['approved','rejected'].includes(application.status)
@@ -2225,8 +2231,8 @@ function App(){
    <button type="button" className="outline" onClick={()=>setPage('lender')}>Back to lending</button>
    <LoanDisbursements key={institutionId} institutionId={institutionId} load={json} revision={portfolio}
     open={id=>{setForm({});void openLoan(id)}} pending={canDisburse?lenderLoans.filter(
-      loan=>loan.status==='awaiting_disbursement'&&Number(loan.undisbursed_ghs)>0).map(
-      loan=>({id:loan.id,undisbursed_ghs:loan.undisbursed_ghs})):[]}/>
+      loan=>loan.status==='awaiting_disbursement'&&Number(loan.available_for_disbursement_ghs??loan.undisbursed_ghs)>0).map(
+      loan=>({id:loan.id,undisbursed_ghs:loan.available_for_disbursement_ghs??loan.undisbursed_ghs})):[]}/>
  </>}
  {page==='lender'&&<>
   {lenderSection&&<a className="outline" href="#institution">Back to institution dashboard</a>}
@@ -2254,6 +2260,7 @@ function App(){
      {institutionRole==='owner'&&<>
       <a className="outline" href="#institution/staff">Institution staff</a>
       <a className="outline" href="#institution/branches">Branches</a>
+      <a className="outline" href="#institution/disbursement-approvals">Disbursement approvals</a>
       <a className="outline" href="#institution/accounting">Chart of accounts</a>
       <a className="outline" href="#institution/journals">Posted journals</a>
       <a className="outline" href="#institution/trial-balance">Trial balance</a>
@@ -2286,6 +2293,11 @@ function App(){
     <InstitutionPeriods key={institutionId} institutionId={institutionId} api={json}/>}
   {lenderSection==='accounting'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
     <InstitutionAccounts key={institutionId} institutionId={institutionId} api={json}/>}
+  {lenderSection==='disbursement-approvals'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
+    <DisbursementReviews key={institutionId} institutionId={institutionId}
+      required={Boolean(selectedInstitution.require_disbursement_approval)} api={json}
+      refresh={()=>Promise.all([loadBase(),loadLender()])}
+      video={id=>void download('/finance/loan-evidence/'+id+'/video','disbursement_evidence_'+id)}/>}
   {lenderSection==='branches'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
     <InstitutionBranches key={institutionId} institutionId={institutionId} api={json}/>}
   {lenderSection==='staff'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
@@ -2362,6 +2374,7 @@ function App(){
    <Line label="Total contract repayment" value={money(selectedLoan.total_contract_repayment_ghs)}/>
    <Line label="Disbursed" value={money(selectedLoan.disbursed_ghs)}/>
    <Line label="Undisbursed" value={money(selectedLoan.undisbursed_ghs)}/>
+   {Number(selectedLoan.pending_disbursement_ghs)>0&&<Line label="Awaiting approval" value={money(selectedLoan.pending_disbursement_ghs)}/>}
    <Line label="Outstanding principal" value={money(selectedLoan.outstanding_principal_ghs)}/>
    <Line label="Outstanding interest" value={money(selectedLoan.outstanding_scheduled_interest_ghs)}/>
    <Line label="Commitment fee" value={money(selectedLoan.commitment_fee_ghs)}/>
@@ -2372,13 +2385,13 @@ function App(){
    <Line label="Annual flat interest rate" value={`${num(selectedLoan.annual_flat_interest_percent)}%`}/>
    <Line label="Repayment schedule" value={selectedLoan.repayment_frequency}/>
   </div>
-  {(page==='lender'||page==='disbursements')&&canDisburse&&selectedLoan.status==='awaiting_disbursement'&&Number(selectedLoan.undisbursed_ghs)>0&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'disbursements')}>
-   <h3>Record loan disbursement</h3>
-   <label className="field"><span>Amount (GH₵)</span><input required type="number" min="0.01" max={selectedLoan.undisbursed_ghs} step="0.01" value={form.loan_amount_ghs??''} onChange={e=>setForm({...form,loan_amount_ghs:e.target.value})}/></label>
+  {(page==='lender'||page==='disbursements')&&canDisburse&&selectedLoan.status==='awaiting_disbursement'&&Number(selectedLoan.available_for_disbursement_ghs??selectedLoan.undisbursed_ghs)>0&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'disbursements')}>
+   <h3>{selectedInstitution?.require_disbursement_approval?'Prepare disbursement for approval':'Record loan disbursement'}</h3>
+   <label className="field"><span>Amount (GH₵)</span><input required type="number" min="0.01" max={selectedLoan.available_for_disbursement_ghs??selectedLoan.undisbursed_ghs} step="0.01" value={form.loan_amount_ghs??''} onChange={e=>setForm({...form,loan_amount_ghs:e.target.value})}/></label>
    <label className="field"><span>Transfer reference</span><input required minLength={3} maxLength={100} value={form.loan_reference??''} onChange={e=>setForm({...form,loan_reference:e.target.value})}/></label>
    <label className="field"><span>Disbursement date</span><input required type="date" max={localDate()} value={form.loan_transaction_date??''} onChange={e=>setForm({...form,loan_transaction_date:e.target.value})}/></label>
    <EvidenceRecorder key={`loan-${selectedLoan.id}-disbursement-${transactionRecorderKey}`} activity="disbursement" unit={null} requireFarmGps={false} onChange={video=>{setTransactionVideo(video);setTransactionEvidenceId(null)}} getChallenge={getEvidenceChallenge}/>
-   <button className="primary" disabled={busy||!transactionVideo}>Record disbursement</button>
+   <button className="primary" disabled={busy||!transactionVideo}>{selectedInstitution?.require_disbursement_approval?'Submit for approval':'Record disbursement'}</button>
   </form>}
   {(page==='lender'||page==='collections')&&canRepay&&selectedLoan.status==='active'&&<form className="farmform" onSubmit={e=>void saveLoanTransaction(e,'repayments')}>
    <h3>Record loan repayment</h3>

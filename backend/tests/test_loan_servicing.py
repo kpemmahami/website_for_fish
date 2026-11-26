@@ -78,10 +78,42 @@ def test_loan_servicing_permissions_and_balances():
     accepted = next(response for response in results if response.status_code == 201)
     assert accepted.json()['disbursed_ghs'] == 8000
     assert accepted.json()['undisbursed_ghs'] == 2000
+    policy_path = f'/finance/institutions/{iid}/disbursement-policy'
+    review_path = f'/finance/loans/{loan_id}/disbursement-reviews'
+    queue_path = f'/finance/institutions/{iid}/disbursement-reviews'
+    assert client.put(policy_path, json={'required': True}, headers=officer).status_code == 404
+    assert client.put(policy_path, json={'required': True}, headers=lender).json()['required'] is True
+    rejected_payload = {'amount_ghs': '500.00', 'reference': 'BANK-REJECT', 'transaction_date': today,
+                        'evidence_id': upload_loan_video(officer, fid, 'disbursement', loan_id)}
+    rejected_request = client.post(review_path, json=rejected_payload, headers=officer)
+    assert rejected_request.status_code == 201, rejected_request.text
+    rejection = client.post(review_path+f"/{rejected_request.json()['id']}/decision",
+                            json={'decision': 'rejected', 'reason': 'External receipt did not match'}, headers=lender)
+    assert rejection.status_code == 200, rejection.text
+    assert client.get(queue_path, params={'status': 'rejected'}, headers=lender).json()['items'] == [rejection.json()]
+    assert client.get(f'/finance/loans/{loan_id}', headers=lender).json()['available_for_disbursement_ghs'] == 2000
     final_tranche = {'amount_ghs': '2000.00', 'reference': 'BANK-TRX-2', 'transaction_date': today,
-                     'evidence_id': upload_loan_video(lender, fid, 'disbursement', loan_id)}
-    dis2 = client.post(disbursement_path, json=final_tranche, headers=lender)
-    assert dis2.status_code==201,dis2.text
+                     'evidence_id': upload_loan_video(officer, fid, 'disbursement', loan_id)}
+    assert client.post(disbursement_path, json=final_tranche, headers=officer).status_code == 409
+    assert client.post(review_path, json=final_tranche, headers=lender).status_code == 403
+    prepared = client.post(review_path, json=final_tranche, headers=officer)
+    assert prepared.status_code == 201, prepared.text
+    assert client.post(review_path, json=final_tranche, headers=officer).json() == prepared.json()
+    assert client.post(review_path, json={**final_tranche, 'reference': 'BANK-OVER'}, headers=officer).status_code == 422
+    reserved_loan = client.get(f'/finance/loans/{loan_id}', headers=officer).json()
+    assert reserved_loan['disbursed_ghs'] == 8000
+    assert reserved_loan['pending_disbursement_ghs'] == 2000
+    assert reserved_loan['available_for_disbursement_ghs'] == 0
+    assert client.get(queue_path, headers=lender).json()['items'] == [prepared.json()]
+    assert client.put(policy_path, json={'required': False}, headers=lender).status_code == 409
+    decision_path = review_path+f"/{prepared.json()['id']}/decision"
+    decision = {'decision': 'approved', 'reason': 'Checked external settlement'}
+    assert client.post(decision_path, json=decision, headers=officer).status_code == 404
+    approved = client.post(decision_path, json=decision, headers=lender)
+    assert approved.status_code == 200, approved.text
+    assert client.post(decision_path, json=decision, headers=lender).json() == approved.json()
+    assert client.get(queue_path, headers=lender).json()['items'] == []
+    dis2=client.get(f'/finance/loans/{loan_id}', headers=lender)
     assert dis2.json()['status']=='active'
     assert dis2.json()['disbursed_ghs']==10000
     assert dis2.json()['scheduled_interest_ghs']==1200

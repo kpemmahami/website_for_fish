@@ -28,6 +28,7 @@ class Institution(Base):
     account_number: Mapped[str] = mapped_column(String(100), nullable=False, default='')
     owner_user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default='pending')
+    require_disbursement_approval: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 class InstitutionMember(Base):
@@ -158,7 +159,8 @@ def require_application_scope(db, application, user_id):
 def institution_view(x):
     account_number = getattr(x, 'account_number', None) or x.registration_number
     return {'id':x.id,'name':x.name,'institution_type':x.institution_type,
-            'registration_number':account_number,'account_number':account_number,'status':x.status}
+            'registration_number':account_number,'account_number':account_number,'status':x.status,
+            'require_disbursement_approval':x.require_disbursement_approval}
 
 
 def application_reference(application):
