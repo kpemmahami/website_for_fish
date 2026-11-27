@@ -15,6 +15,7 @@ import {FeedOutlook} from './feedOutlook';
 import {FeedingScheduleEditor, feedingStatus, ghanaFeedingTime} from './feedingSchedule';
 import {ReportCards, ReportDetail, reports, type ReportView} from './farmReportViews';
 import {PricingAdvisor} from './pricingAdvisor';
+import {FarmAssistant} from './farmAssistant';
 import { FarmExpenses} from './farmExpenses';
 import {ErrorNotice, friendlyApiError, responseError, UserFacingError} from './apiErrors';
 import {ProductionIntelligence} from './productionIntelligence';
@@ -32,7 +33,7 @@ import {Waves, LayoutDashboard, Fish, Wallet, Landmark, FileDown, LogOut, Refres
 import './style.css';
 
 type Obj = Record<string, any>;
-type Page = 'overview'|'farms'|'units'|'production'|'finance'|'reports'|'lender'|'admin'|'sales'|'inventory'|'staff'|'settings'|'expenses'|'history'|'processing'|'collections'|'disbursements';
+type Page = 'overview'|'farms'|'units'|'production'|'finance'|'reports'|'lender'|'admin'|'sales'|'inventory'|'staff'|'settings'|'expenses'|'history'|'processing'|'collections'|'disbursements'|'assistant';
 const productionActivities = [
  {key:'stocking', label:'Stocking', description:'Record new stock and plan harvest dates.', icon:Fish},
  {key:'feeding', label:'Feeding', description:'Check feed stock and record consumption.', icon:Package},
@@ -295,7 +296,7 @@ function App(){
    'trial-balance': 'Trial balance',
    security: 'Institution account security',
  } as const;
- const lenderSection = adminHash.startsWith('#institution/') ? adminHash.slice(13) : '';
+ const [lenderSection, lenderQuery = ''] = adminHash.startsWith('#institution/') ? adminHash.slice(13).split('?', 2) : [''];
  const lenderTitle = lenderSections[lenderSection as keyof typeof lenderSections];
  const lenderApplications = ['pending', 'approved', 'rejected'].includes(lenderSection);
 
@@ -1311,6 +1312,7 @@ function App(){
  const nav=([
    ['overview','Dashboard',<LayoutDashboard size={18}/>],
    ['farms','My Farms',<Building2 size={18}/>],
+   ['assistant','Farm Assistant',<Fish size={18}/>],
    ['production','Production',<Fish size={18}/>],
    ['processing','Processing & Value Addition',<Package size={18}/>],
    ['sales','Sales & Invoices',<ShoppingBasket size={18}/>],
@@ -1325,7 +1327,7 @@ function App(){
    if(!user)return false;
    if(user.is_platform_admin)return key==='admin';
    if(key==='admin')return false;
-   if(processorOnly&&['farms','production','inventory','finance'].includes(key))return false;
+   if(processorOnly&&['farms','assistant','production','inventory','finance'].includes(key))return false;
    if(key==='lender')return user.account_type==='institution'||user.account_type==='legacy'||mine.length>0;
    return user.account_type!=='institution';
  });
@@ -1713,6 +1715,10 @@ function App(){
   <p className="footnote">SMS delivery requires Hubtel credentials configured by the operator. You can disable reminders here at any time.</p>
  </section>}
  {page==='overview'&&farmId&&<div className="workspace-tabs"><button className="primary" onClick={()=>{setPage('finance');setForm({});setSelectedLoan(null);window.scrollTo(0,0)}}>Request a Loan</button></div>}
+ {page==='assistant'&&(farmId&&farms.some(farm=>farm.id===farmId)
+   ? <FarmAssistant key={farmId} farmId={farmId} farmName={farms.find(farm=>farm.id===farmId)?.name??'Selected farm'}
+       load={json} ask={json}/>
+   : <section className="panel"><p>Register a farm in My Farms to use the assistant.</p></section>)}
  {page==='overview'&&processorOnly&&<section className="panel"><h2>{processingBusiness.name}</h2><p>Manage raw fish purchases, processing batches, finished stock and customer invoices.</p>
   <button className="primary" onClick={()=>openProcessing()}>Processing Overview</button></section>}
  {page==='overview'&&!processorOnly&&<>
@@ -2290,7 +2296,8 @@ function App(){
   </div>}
   {lenderSection==='security'&&<section className="panel"><h2>Account security</h2>{phoneVerification}</section>}
   {(lenderSection==='journals'||lenderSection==='trial-balance')&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
-    <InstitutionLedger key={institutionId+':'+lenderSection} institutionId={institutionId} mode={lenderSection} load={json}/>}
+    <InstitutionLedger key={institutionId+':'+lenderSection+':'+lenderQuery} institutionId={institutionId} mode={lenderSection}
+      routeQuery={lenderQuery} load={json} download={download}/>}
   {lenderSection==='periods'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&
     <InstitutionPeriods key={institutionId} institutionId={institutionId} api={json}/>}
   {lenderSection==='accounting'&&selectedInstitution?.status==='verified'&&institutionRole==='owner'&&institutionId!=null&&

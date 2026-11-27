@@ -8,7 +8,7 @@ from app.operations import StockingCycle
 from app.sales import Customer, FishSale, HarvestLot
 
 
-def test_pricing_margin_harvest_allocation_and_access():
+def test_pricing_margin_harvest_allocation_and_access(monkeypatch):
     owner = auth('price-advisor-owner@example.com')
     other = auth('price-advisor-other@example.com')
     farmer = client.get('/auth/me', headers=owner).json()['id']
@@ -34,6 +34,42 @@ def test_pricing_margin_harvest_allocation_and_access():
     quote = response.json()
     assert (quote['saleable_weight_kg'],quote['unallocated_ghs']) == (1000,1000)
     assert (quote['break_even_ghs_per_kg'],quote['target_ghs_per_kg']) == (8,10.67)
+    assistant = f'/farms/{farm}/assistant'
+    question = {'question': 'What price should I sell my fish for?', 'cycle_id': cycle_id}
+    assert client.get(assistant, headers=owner).json()['cycles'][0]['id'] == cycle_id
+    assert client.get(assistant, headers=other).status_code == 404
+    assert client.post(assistant, json=question, headers=other).status_code == 404
+    assert client.post(assistant, json={**question, 'cycle_id': cycle_id+100000}, headers=owner).status_code == 404
+    answer = client.post(assistant, json=question, headers=owner).json()
+    assert answer['source'] == 'Pricing advisor'
+    assert 'GHS 10.67/kg' in answer['answer'] and 'GHS 8.00/kg' in answer['answer']
+    cash = client.post(assistant, json={'question': 'Cash flow for the last 7 days'}, headers=owner).json()
+    assert cash['source'] == 'Farm cash activity' and 'Net recorded cash' in cash['answer']
+
+    monkeypatch.delenv('AQUAFARM_ASSISTANT_API_KEY', raising=False)
+    assert client.get(assistant, headers=owner).json()['ai_enabled'] is False
+    summary = client.post(assistant, json={'question': 'Summarize my farm'}, headers=owner).json()
+    assert summary['source'] == 'Farm dashboard' and '1 active cycles' in summary['answer']
+    guidance = client.post(assistant, json={'question': 'What should I record when feeding fish?'}, headers=owner).json()
+    assert guidance['source_url'].startswith('https://www.fao.org/')
+
+    from app import farm_assistant
+    monkeypatch.setenv('AQUAFARM_ASSISTANT_API_KEY', 'mock-key')
+    monkeypatch.setenv('AQUAFARM_ASSISTANT_MODEL', 'mock-model')
+
+    def provider(url, *, headers, json, timeout):
+        import httpx
+        assert url == 'https://api.openai.com/v1/chat/completions'
+        assert json['store'] is False
+        context = json['messages'][-1]['content']
+        assert 'farm_snapshot_ghs' in context
+        assert 'Pricing pond' not in context and 'by_product' not in context
+        return httpx.Response(200, request=httpx.Request('POST', url),
+                              json={'choices': [{'message': {'content': 'Mock farm answer'}}]})
+
+    monkeypatch.setattr(farm_assistant.httpx, 'post', provider)
+    ai = client.post(assistant, json={'question': 'How can I improve growth?'}, headers=owner).json()
+    assert ai['answer'] == 'Mock farm answer'
     proposal = quote['proposal']
     assert (proposal['revenue_ghs'],proposal['profit_ghs'],proposal['margin_pct']) == (11000,3000,27.27)
     assert client.post(path,json={'proposed_price':7},headers=owner).json()['proposal']['profit_ghs'] == -1000

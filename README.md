@@ -133,6 +133,12 @@ accounts can reach their institution workspace after signing in as farmers.
 | Institution officer | Record disbursements and repayments |
 | Platform administrator | Approve or reject pending institutions and invite administrators |
 
+## Farmer Farm Assistant
+
+Open **Farm Assistant** from the farmer workspace and select a farm. The chat can summarize production, feed, sales and costs, show recent cash activity, and use the existing Pricing Advisor for a selected stocking cycle. Asking for a price uses the selected profit margin and displays the assumptions and missing data. Chat history lasts for the current page and farm.
+
+Built-in answers and the pricing calculations work locally. To enable open-ended AI answers, set the server-side environment variables `AQUAFARM_ASSISTANT_API_KEY` and `AQUAFARM_ASSISTANT_MODEL` to an OpenAI API key and a Chat Completions-compatible model, then restart the backend. Keep the key on the backend. General AI requests send the conversation and aggregate farm figures to OpenAI. The assistant has read-only access and checks farm ownership and cycle scope for each request. No schema migration is required.
+
 ## Isolated local test portal
 
 Use separate PowerShell terminals with the project virtual environment active.

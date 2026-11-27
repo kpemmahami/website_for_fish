@@ -1,5 +1,7 @@
 """Internal double-entry posting primitives for institution accounting."""
+import csv
 import hashlib
+import io
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -7,6 +9,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, String, UniqueConstraint, func, select, update
@@ -252,7 +255,9 @@ def journal_view(journal: AccountingJournal):
 
 @app.get(ACCOUNTING+'/journals', tags=TAG)
 def list_journals(institution_id: int, user: CurrentUser, db: Db,
-                  start: date | None = None, end: date | None = None, offset: int = Query(0, ge=0)):
+                  start: date | None = None, end: date | None = None, offset: int = Query(0, ge=0),
+                  reference: Annotated[str, Query(max_length=200)] = '',
+                  account_code: Annotated[str, Query(max_length=32)] = ''):
     member(db, institution_id, user.id, 'manage_staff')
     if start and end and start > end:
         raise HTTPException(422, 'Start date must be on or before end date')
@@ -261,9 +266,62 @@ def list_journals(institution_id: int, user: CurrentUser, db: Db,
         query = query.where(AccountingJournal.effective_on >= start)
     if end:
         query = query.where(AccountingJournal.effective_on <= end)
+    query = filter_journals(query, institution_id, reference, account_code)
     journals = db.scalars(query.order_by(AccountingJournal.effective_on.desc(), AccountingJournal.id.desc())
                           .offset(offset).limit(26)).all()
     return {'items': [journal_view(journal) for journal in journals[:25]], 'has_more': len(journals) > 25}
+
+
+def filter_journals(query, institution_id: int, reference: str, account_code: str):
+    reference = reference.strip()
+    if reference:
+        query = query.where(func.lower(AccountingJournal.source_reference).contains(reference.lower(), autoescape=True))
+    account_code = account_code.strip().upper()
+    if account_code:
+        matching_journals = select(AccountingLine.journal_id).join(
+            AccountingAccount, AccountingAccount.id == AccountingLine.account_id,
+        ).where(AccountingAccount.institution_id == institution_id, AccountingAccount.code == account_code)
+        query = query.where(AccountingJournal.id.in_(matching_journals))
+    return query
+
+
+def csv_text(value: str) -> str:
+    if value.startswith(('\t', '\r', '\n')) or value.lstrip().startswith(('=', '+', '-', '@')):
+        return "'" + value
+    return value
+
+
+@app.get(ACCOUNTING+'/journals/export', tags=TAG)
+def export_journals(institution_id: int, start: date, end: date, user: CurrentUser, db: Db,
+                    reference: Annotated[str, Query(max_length=200)] = '',
+                    account_code: Annotated[str, Query(max_length=32)] = ''):
+    member(db, institution_id, user.id, 'manage_staff')
+    if start > end:
+        raise HTTPException(422, 'Start date must be on or before end date')
+    query = select(
+        AccountingJournal.id, AccountingJournal.effective_on, AccountingJournal.source_reference,
+        AccountingAccount.code, AccountingAccount.name, AccountingLine.debit_pesewas,
+        AccountingLine.credit_pesewas,
+    ).select_from(AccountingJournal).join(
+        AccountingLine, AccountingLine.journal_id == AccountingJournal.id,
+    ).join(AccountingAccount, AccountingAccount.id == AccountingLine.account_id).where(
+        AccountingJournal.institution_id == institution_id,
+        AccountingAccount.institution_id == institution_id,
+        AccountingJournal.effective_on.between(start, end),
+    ).order_by(AccountingJournal.effective_on.desc(), AccountingJournal.id.desc(), AccountingLine.id)
+    rows = db.execute(filter_journals(query, institution_id, reference, account_code))
+    output = io.StringIO(newline='')
+    output.write('\ufeff')
+    writer = csv.writer(output)
+    writer.writerow(['Journal ID', 'Effective date', 'Source reference', 'Account code',
+                     'Account name', 'Debit (GHS)', 'Credit (GHS)'])
+    for journal_id, effective_on, reference, code, name, debit, credit in rows:
+        writer.writerow([journal_id, effective_on, csv_text(reference), csv_text(code), csv_text(name),
+                         amount_ghs(debit), amount_ghs(credit)])
+    return Response(output.getvalue(), media_type='text/csv', headers={
+        'Cache-Control': 'private, no-store',
+        'Content-Disposition': f'attachment; filename="journals-{start}-to-{end}.csv"',
+    })
 
 
 @app.get(ACCOUNTING+'/journals/{journal_id}', tags=TAG)

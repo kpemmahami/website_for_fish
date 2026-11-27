@@ -745,6 +745,7 @@ from . import production_alerts
 from . import request_diagnostics
 from . import farm_expenses
 from . import pricing_advisor
+from . import farm_assistant
 from . import farm_report_views
 
 from . import feed_outlook

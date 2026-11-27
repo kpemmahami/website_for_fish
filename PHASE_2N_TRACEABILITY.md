@@ -44,6 +44,24 @@ Verified institution owners can open #institution/accounting, list accounts, cre
 
 Verified institution owners can open Posted journals and Trial balance from the web institution dashboard. Journal list and detail APIs constrain results to the selected institution. The list API supports effective-date filters and pagination. Trial balance calculates net debit and credit per account from posted journals through the selected date, includes inactive accounts with historical activity, and reports an imbalance explicitly. Money is returned as fixed-precision GHS strings. The focused SQLite test checked dated totals, details, and cross-tenant denial. No migration beyond 0044 is required. Posting integrations, controlled reversals, financial periods, exports and hosted acceptance remain open.
 
+The Trial balance page now downloads its loaded snapshot as CSV, including the effective cutoff, account codes and names, and debit and credit totals in GHS. The export uses the institution owner's existing authorized report data.
+
+Posted journal details also export their loaded lines as CSV, including the journal ID, effective date, source reference and GHS debit and credit amounts.
+
+The operator confirmed local signed-in browser checks for the Trial balance and Posted journals CSV downloads on 27 November 2026.
+
+Posted journals supports inclusive effective-date filters. Changing either date returns to the first page, and returning from journal details preserves the filtered page.
+
+Owners can select the last 7, 14, 30, 60 or 90 days through today in Ghana or enter both dates to download all matching journal lines across pages. A SQLite regression verified both date boundaries, exports larger than one page and cross-institution denial.
+
+Source reference search matches partial references without regard to letter case. It applies to both the paginated list and the date-range CSV. SQLite tests verified matching journal IDs and literal wildcard characters.
+
+The operator confirmed that Last 30 days downloaded a CSV with the expected column headers in a signed-in local browser on 27 November 2026. The selected range returned zero posted journal lines. The operator then confirmed a populated CSV for the fictional Local Test Bank journal CSV-CHECK-001. It included the GHS 125.00 debit to TEST-CASH and the matching credit to TEST-DEPOSITS under the same journal ID. The authenticated local API also confirmed that the combined date, source-reference and account-code filters returned that journal and both lines.
+
+The account-code filter finds journals that posted to the specified account. The date-range CSV includes every line of each matching journal, preserving both sides of the entry. SQLite tests verified the combined filters, complete matching entries and empty results.
+
+Account rows in Trial balance link to Posted journals filtered by account code and the report cutoff. Back to trial balance restores the cutoff. Frontend route checks verified the filters, cutoff restoration and institution matching. The operator confirmed that clicking TEST-CASH in the signed-in Local Test Bank portal showed journal CSV-CHECK-001.
+
 ### Monthly accounting period controls
 
 Migration 0045 adds monthly institution period states. Owners can close/reopen from #institution/periods with an audited reason. Posting and month changes share a database lock. New journals effective in a closed month are rejected, while exact retries return their original journal. Reopened months accept new journals. Three focused SQLite accounting and servicing tests passed, and the web build succeeded. PostgreSQL acceptance, independent reopening authorization, financial close reconciliation and legacy-event posting integration remain release gates.

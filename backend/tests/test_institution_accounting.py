@@ -1,3 +1,4 @@
+import csv
 from datetime import date
 
 import pytest
@@ -105,3 +106,49 @@ def test_journal_is_balanced_scoped_and_idempotent():
     with SessionLocal.begin() as db:
         assert post_journal(db, **{**args, 'source_reference': 'AFTER-CLOSE'}, lines=lines).id != journal_id
     assert client.get(periods, headers=owner).json()[0]['starts_on'] == '2026-11-01'
+
+    with SessionLocal.begin() as db:
+        for index in range(25):
+            post_journal(db, **{**args, 'source_reference': f'EXPORT-{index}'}, lines=lines)
+        post_journal(db, **{**args, 'source_reference': 'OUTSIDE-RANGE',
+                            'effective_on': date(2026, 11, 27)}, lines=lines)
+        post_journal(db, **{**args, 'source_reference': '=1+1',
+                            'effective_on': date(2026, 11, 25)}, lines=lines)
+    export = journal_root+'/journals/export'
+    dates = {'start': '2026-11-25', 'end': '2026-11-26'}
+    assert client.get(export, headers=other_owner, params=dates).status_code == 404
+    assert client.get(export, headers=owner, params={**dates, 'end': '2026-11-24'}).status_code == 422
+    response = client.get(export, headers=owner, params=dates)
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert 'journals-2026-11-25-to-2026-11-26.csv' in response.headers['content-disposition']
+    rows = list(csv.DictReader(response.content.decode('utf-8-sig').splitlines()))
+    assert len(rows) == 56
+    assert len({row['Journal ID'] for row in rows}) == 28
+    assert {row['Effective date'] for row in rows} == {'2026-11-25', '2026-11-26'}
+    assert {row['Source reference'] for row in rows if row['Effective date'] == '2026-11-25'} == {"'=1+1"}
+    assert {(row['Debit (GHS)'], row['Credit (GHS)']) for row in rows} == {('10.00', '0.00'), ('0.00', '10.00')}
+
+    filters = {**dates, 'reference': ' test-1 '}
+    listed = client.get(journal_root+'/journals', headers=owner, params=filters).json()['items']
+    assert [item['id'] for item in listed] == [journal_id]
+    matched = client.get(export, headers=owner, params=filters)
+    assert matched.status_code == 200
+    matched_rows = list(csv.DictReader(matched.content.decode('utf-8-sig').splitlines()))
+    assert [row['Journal ID'] for row in matched_rows] == [str(journal_id)] * 2
+    for wildcard in ('%', '_'):
+        assert client.get(journal_root+'/journals', headers=owner,
+                          params={'reference': wildcard}).json()['items'] == []
+
+    account_filters = {**filters, 'account_code': ' 1000 '}
+    listed = client.get(journal_root+'/journals', headers=owner, params=account_filters).json()['items']
+    assert [item['id'] for item in listed] == [journal_id]
+    account_export = client.get(export, headers=owner, params=account_filters)
+    assert account_export.status_code == 200
+    exported = list(csv.DictReader(account_export.content.decode('utf-8-sig').splitlines()))
+    assert {row['Account code'] for row in exported} == {'1000', '2000'}
+    unmatched = {**dates, 'account_code': 'cash-1000'}
+    assert client.get(journal_root+'/journals', headers=owner, params=unmatched).json()['items'] == []
+    empty_export = client.get(export, headers=owner, params=unmatched)
+    assert empty_export.status_code == 200
+    assert list(csv.DictReader(empty_export.content.decode('utf-8-sig').splitlines())) == []
