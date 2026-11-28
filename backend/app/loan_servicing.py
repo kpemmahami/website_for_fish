@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import update, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, select, func, or_
 from sqlalchemy.orm import Mapped, mapped_column
 from .main import Base, app, Db, CurrentUser, Farm, User, owned_farm, audit
+from .sms_outbox import enqueue_financial_sms, notifications_enabled
 from .lending import Institution, InstitutionMember, LoanApplication, LoanDecision, application_scope, require_application_scope, member, ghs
 
 TAG = ['Loan disbursement and recovery (manual ledger)']
@@ -569,6 +570,8 @@ def post_disbursement(db, loan, amount, reference, disbursed_on, evidence, recor
         'amount_ghs': ghs(amount), 'reference': reference, 'evidence_id': evidence.id,
         'prepared_by': recorded_by,
     }))
+    if notifications_enabled():
+        enqueue_financial_sms(db, db.get(Farm, loan.farm_id).owner_id, 'disbursement', transaction.id)
 
 
 @app.post('/finance/loans/{loan_id}/disbursements', status_code=201, tags=TAG)
@@ -783,7 +786,13 @@ def post_repayment(db, loan, data, user, *, field_collection=False):
         'amount_ghs':ghs(amount),'reference':data.reference,'evidence_id':evidence.id,
         'interest_ghs':ghs(interest_part),'fees_ghs':ghs(fees_part),'principal_ghs':ghs(principal_part),
         **({'customer_consented': True} if field_collection else {}),
-    }));db.commit()
+    }))
+    if notifications_enabled():
+        customer = db.get(Farm, loan.farm_id).owner_id
+        enqueue_financial_sms(db, customer, 'settlement' if amount == balance else 'repayment', transaction.id)
+        if excess:
+            enqueue_financial_sms(db, customer, 'deposit', transaction.id)
+    db.commit()
     return transaction
 
 def collection_account_number(loan_id: int) -> str:
@@ -824,6 +833,7 @@ def record_field_deposit(loan_id: int, data: FieldRepaymentIn, user: CurrentUser
         evidence.record_id = deposit.id
         audit(db, user, 'record_deposit', 'collection_deposit', deposit.id,
               json.dumps({'institution_id': loan.institution_id, 'customer_consented': True}))
+        enqueue_financial_sms(db, customer_id, 'deposit', f'standalone:{deposit.id}')
         db.commit()
     return {'id': deposit.id, 'reference': deposit.reference, 'amount_ghs': ghs(amount),
             'applied_to_loan_ghs': 0, 'deposited_ghs': ghs(amount), 'posted_at': deposit.created_at}

@@ -16,7 +16,7 @@ def test_saved_phone_verification_and_replacement(monkeypatch):
     token = client.post('/auth/farmer/login', json={'email': email, 'password': password}).json()['access_token']
     headers = {'Authorization': f'Bearer {token}'}
     messages = []
-    monkeypatch.setattr(phone_verification, 'hubtel_send_sms', lambda *args: messages.append(args))
+    monkeypatch.setattr(phone_verification, 'send_sms', lambda *args: messages.append(args))
     request = '/auth/me/phone-verification/request'
     confirm = '/auth/me/phone-verification/confirm'
     assert client.post(request).status_code == 401

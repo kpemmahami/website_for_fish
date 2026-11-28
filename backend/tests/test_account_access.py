@@ -1,4 +1,4 @@
-﻿"""Account separation and administrator provisioning regression coverage."""
+"""Account separation and administrator provisioning regression coverage."""
 import json
 
 import pytest
@@ -88,7 +88,7 @@ def complete_initial_password(email, initial_password):
     password = 'a-private-institution-password-741'
     changed = {'token': token, 'password': password, 'code': '111111'}
     assert client.post(setup_path, json=changed).status_code == 400
-    with patch('app.phone_verification.hubtel_send_sms') as send_sms:
+    with patch('app.phone_verification.send_sms') as send_sms:
         sent = client.post(f'{setup_path}/verification', json={'token': token})
         assert sent.status_code == 200
         phone, message = send_sms.call_args.args
@@ -114,7 +114,7 @@ def complete_initial_password(email, initial_password):
     with SessionLocal.begin() as db:
         challenge = db.scalar(select(AccountPhoneChallenge).join(User).where(User.email == email))
         challenge.sent_at -= timedelta(minutes=3)
-    with patch('app.phone_verification.hubtel_send_sms') as send_sms:
+    with patch('app.phone_verification.send_sms') as send_sms:
         assert client.post('/auth/institution/mfa/request', json={'token': token}).status_code == 400
         assert client.post('/auth/institution/mfa/request', json={'token': mfa_token}).status_code == 200
         code = send_sms.call_args.args[1].split(': ')[1].split('.')[0]
@@ -287,7 +287,7 @@ def test_only_owner_can_prepare_an_administrator_without_granting_access(monkeyp
     emails, messages = [], []
     monkeypatch.setattr(verification, 'recovery_mail_settings', lambda: ('mock', 'test@example.com', 'https://example.com'))
     monkeypatch.setattr(verification, 'send_account_email', lambda *args: emails.append(args) or True)
-    monkeypatch.setattr(verification, 'hubtel_send_sms', lambda *args: messages.append(args))
+    monkeypatch.setattr(verification, 'send_sms', lambda *args: messages.append(args))
     send_path = f'{path}/{account_id}/contact-verification'
     assert client.post(send_path, headers=login('admin', ordinary_email)).status_code == 403
     assert client.post(send_path, headers=owner).status_code == 200
@@ -341,7 +341,7 @@ def test_existing_administrator_enrollment_revokes_old_sessions(monkeypatch):
     monkeypatch.setenv('AQUAFARM_ADMIN_AUTHENTICATOR_KEY', 'fictional-authenticator-key-for-tests')
     monkeypatch.setattr(verification, 'recovery_mail_settings', lambda: ('mock', 'test@example.com', 'https://example.com'))
     monkeypatch.setattr(verification, 'send_account_email', lambda *args: emails.append(args) or True)
-    monkeypatch.setattr(verification, 'hubtel_send_sms', lambda *args: messages.append(args))
+    monkeypatch.setattr(verification, 'send_sms', lambda *args: messages.append(args))
     assert client.post(route, headers=logged_in, json={'password': PASSWORD}).status_code == 200
     assert client.get('/auth/me', headers=logged_in).json()['authenticator_enrolled'] is False
     login('admin', email)
