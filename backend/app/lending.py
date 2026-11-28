@@ -831,5 +831,10 @@ def appraise(institution_id:int,application_id:int,data:DecisionIn,user:CurrentU
     if changed.rowcount != 1:
         raise HTTPException(409, 'Application status changed during review')
     db.add(LoanDecision(application_id=obj.id,reviewer_user_id=user.id,decision=data.decision,rationale=data.rationale,approved_pesewas=pesewas(data.approved_ghs) if data.approved_ghs is not None else None))
-    audit(db,user,'appraise','loan_application',obj.id); db.commit()
+    audit(db,user,'appraise','loan_application',obj.id)
+    if data.decision in ('approved', 'rejected'):
+        from .sms_outbox import enqueue_financial_sms, notifications_enabled
+        if notifications_enabled():
+            enqueue_financial_sms(db, db.get(Farm, obj.farm_id).owner_id, f'loan-{data.decision}', obj.id)
+    db.commit()
     return {'application_id':obj.id,'status':obj.status,'approved_ghs':float(data.approved_ghs) if data.approved_ghs is not None else None}

@@ -1,4 +1,4 @@
-"""Daily feeding-record status and opt-in Hubtel SMS reminders."""
+"""Daily feeding-record status and opt-in SMS reminders."""
 from calendar import monthrange
 from datetime import date, datetime, time, timedelta, timezone
 import logging
@@ -17,10 +17,19 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .feeding import FeedLedger
 from .main import Base, CurrentUser, Db, Farm, SessionLocal, User, app, owned_farm
 from .operations import ProductionUnit, StockingCycle
+from .sms_gateway import SmsDeliveryError, configured_provider, env_flag, sandbox_enabled, send_sms, validate_delivery_settings
 
 GHANA_TZ = ZoneInfo('Africa/Accra')
 HUBTEL_URL = 'https://smsc.hubtel.com/v1/messages/send'
 logger = logging.getLogger(__name__)
+
+
+def send_farm_reminder(phone_number: str, message: str) -> str | None:
+    return send_sms(phone_number, message, category='farm')
+
+
+def send_loan_reminder(phone_number: str, message: str) -> str | None:
+    return send_sms(phone_number, message, category='financial')
 
 
 class DailyRecordReminder(Base):
@@ -53,10 +62,6 @@ class LoanSmsReminder(Base):
     last_error: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class SmsDeliveryError(Exception):
-    """A safe-to-log Hubtel delivery error without credentials or recipient data."""
 
 
 def reminder_time() -> time:
@@ -223,7 +228,7 @@ def reserve_reminder(db, user_id: int, today: date, count: int, at: datetime):
 def deliver_daily_record_reminders(
     db,
     at: datetime | None = None,
-    sender: Callable[[str, str], str | None] = hubtel_send_sms,
+    sender: Callable[[str, str], str | None] = send_farm_reminder,
 ) -> int:
     current = local_now(at)
     cutoff = reminder_time()
@@ -255,7 +260,7 @@ def deliver_daily_record_reminders(
         try:
             provider_id = sender(user.phone_number, message)
         except SmsDeliveryError as error:
-            reminder.status = 'failed'
+            reminder.status = error.state
             reminder.last_error = str(error)[:120]
             db.commit()
             logger.error('Daily SMS failed for user_id=%s date=%s: %s', user.id, today, error)
@@ -303,7 +308,7 @@ def reserve_loan_reminder(db, user_id: int, loan_id: int, installment_number: in
 def deliver_loan_sms_reminders(
     db,
     at: datetime | None = None,
-    sender: Callable[[str, str], str | None] = hubtel_send_sms,
+    sender: Callable[[str, str], str | None] = send_loan_reminder,
     *, monthly: bool = False,
 ) -> int:
     from .loan_servicing import LoanAccount, LoanInstallment, LoanRepayment
@@ -393,7 +398,7 @@ def deliver_loan_sms_reminders(
                 try:
                     provider_id = sender(user.phone_number, message)
                 except SmsDeliveryError as error:
-                    reminder.status = 'failed'
+                    reminder.status = error.state
                     reminder.last_error = str(error)[:120]
                     db.commit()
                     logger.error('Loan SMS failed for user_id=%s loan_id=%s: %s', user.id, loan.id, error)
@@ -424,20 +429,26 @@ _scheduler: BackgroundScheduler | None = None
 
 
 def start_daily_reminder_scheduler():
+    from .sms_outbox import deliver_outbox, notifications_enabled
+
     global _scheduler
     daily_enabled = os.getenv('AQUAFARM_DAILY_RECORD_REMINDERS_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
     loans_enabled = os.getenv('AQUAFARM_LOAN_REMINDERS_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
-    if not daily_enabled and not loans_enabled:
+    financial_enabled = notifications_enabled()
+    if not daily_enabled and not loans_enabled and not financial_enabled:
         logger.info('Scheduled SMS reminders are disabled; in-app reminders remain available.')
         return
-    required = ('HUBTEL_CLIENT_ID', 'HUBTEL_CLIENT_SECRET', 'HUBTEL_SMS_SENDER_ID')
-    missing = [key for key in required if not os.getenv(key, '').strip()]
-    if missing:
-        raise RuntimeError(f'Daily SMS reminders are enabled but missing configuration: {", ".join(missing)}')
+    if not env_flag('SMS_ENABLED', configured_provider() == 'hubtel') or sandbox_enabled():
+        logger.info('Scheduled SMS reminders are paused by gateway configuration.')
+        return
+    validate_delivery_settings()
     if loans_enabled and os.getenv('AQUAFARM_LOAN_REMINDER_MODE', 'installment').strip().lower() not in ('installment', 'monthly'):
         raise RuntimeError('AQUAFARM_LOAN_REMINDER_MODE must be installment or monthly')
     cutoff = reminder_time()
     _scheduler = BackgroundScheduler(timezone=GHANA_TZ)
+    if financial_enabled:
+        _scheduler.add_job(deliver_outbox, 'interval', minutes=1,
+                           id='financial-sms-outbox', coalesce=True, max_instances=1)
     _scheduler.add_job(
         scheduled_delivery,
         CronTrigger(hour=cutoff.hour, minute=cutoff.minute, timezone=GHANA_TZ),

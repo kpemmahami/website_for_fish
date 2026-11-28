@@ -14,7 +14,7 @@ from sqlalchemy import BigInteger, DateTime, ForeignKey, String, delete, select,
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .administration import AdminSetup, require_platform_owner
-from .daily_reminders import SmsDeliveryError, hubtel_send_sms
+from .sms_gateway import SmsDeliveryError, send_sms
 from .main import SECRET_KEY, Base, CurrentUser, Db, User, app, audit, password_binding, password_hash, require_platform_admin
 from .password_recovery import recovery_mail_settings, send_account_email
 
@@ -158,7 +158,7 @@ def send_contact_verification(db: Db, actor: User, account: User, existing_proof
     audit(db, actor, 'send_admin_contact_verification', 'platform_admin', administrator_id)
     db.commit()
     try:
-        hubtel_send_sms(phone, f'AquaFarm Manager Ghana verification code: {code}. It expires in 10 minutes.')
+        send_sms(phone, f'AquaFarm Manager Ghana verification code: {code}. It expires in 10 minutes.')
     except SmsDeliveryError:
         raise HTTPException(503, 'Verification SMS could not be sent') from None
     if not send_account_email(

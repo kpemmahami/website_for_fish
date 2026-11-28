@@ -56,6 +56,7 @@ class User(Base):
     initial_password_required: Mapped[bool] = mapped_column(Boolean, server_default=false())
     sms_daily_records_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sms_loan_reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sms_financial_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     account_type: Mapped[str] = mapped_column(String(20), default='farmer')
     farms: Mapped[list['Farm']] = relationship(back_populates='owner')
@@ -167,6 +168,7 @@ class UserOut(BaseModel):
     phone_verified_at: datetime | None
     sms_daily_records_enabled: bool
     sms_loan_reminders_enabled: bool
+    sms_financial_alerts_enabled: bool
     account_type: Literal['legacy', 'farmer', 'pending_farmer', 'institution', 'admin']
     is_platform_admin: bool = False
     is_platform_owner: bool = False
@@ -176,10 +178,11 @@ class ContactUpdate(BaseModel):
     phone_number: PhoneNumber | None = None
     sms_daily_records_enabled: bool = False
     sms_loan_reminders_enabled: bool = False
+    sms_financial_alerts_enabled: bool | None = None
 
     @model_validator(mode='after')
     def enabled_requires_phone(self):
-        if (self.sms_daily_records_enabled or self.sms_loan_reminders_enabled) and not self.phone_number:
+        if (self.sms_daily_records_enabled or self.sms_loan_reminders_enabled or self.sms_financial_alerts_enabled) and not self.phone_number:
             raise ValueError('Add a valid international phone number before enabling SMS reminders')
         return self
 
@@ -531,10 +534,11 @@ class InstitutionMfaConfirm(InitialPasswordProof):
 
 
 @app.post('/auth/institution/mfa/request')
-def send_institution_mfa(data: InitialPasswordProof, db: Db):
+def send_institution_mfa(data: InitialPasswordProof, db: Db, request: Request):
     from .phone_verification import send_institution_phone_code
 
-    return send_institution_phone_code(db, institution_mfa_account(data.token, db), data.token)
+    return send_institution_phone_code(db, institution_mfa_account(data.token, db), data.token,
+                                       request.client.host if request.client else None)
 
 
 @app.post('/auth/institution/mfa/confirm', response_model=Token)
@@ -550,10 +554,11 @@ def confirm_institution_mfa(data: InstitutionMfaConfirm, db: Db):
 
 
 @app.post('/auth/institution/initial-password/verification')
-def send_initial_password_verification(data: InitialPasswordProof, db: Db):
+def send_initial_password_verification(data: InitialPasswordProof, db: Db, request: Request):
     from .phone_verification import send_institution_phone_code
 
-    return send_institution_phone_code(db, initial_password_account(data.token, db), data.token)
+    return send_institution_phone_code(db, initial_password_account(data.token, db), data.token,
+                                       request.client.host if request.client else None)
 
 
 @app.post('/auth/institution/initial-password', response_model=Token)
@@ -620,6 +625,8 @@ def update_contact(data: ContactUpdate, user: CurrentUser, db: Db):
     assign_phone_number(db, user, data.phone_number)
     user.sms_daily_records_enabled = data.sms_daily_records_enabled
     user.sms_loan_reminders_enabled = data.sms_loan_reminders_enabled
+    if data.sms_financial_alerts_enabled is not None or not data.phone_number:
+        user.sms_financial_alerts_enabled = bool(data.sms_financial_alerts_enabled)
     try:
         db.commit()
     except IntegrityError as error:
@@ -733,6 +740,7 @@ from . import administration
 from . import password_recovery
 from . import administrator_verification
 from . import phone_verification
+from . import sms_management
 from . import farm_staff
 
 from . import institution_staff

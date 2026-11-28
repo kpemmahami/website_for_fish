@@ -16,6 +16,7 @@ import {FeedingScheduleEditor, feedingStatus, ghanaFeedingTime} from './feedingS
 import {ReportCards, ReportDetail, reports, type ReportView} from './farmReportViews';
 import {PricingAdvisor} from './pricingAdvisor';
 import {FarmAssistant} from './farmAssistant';
+import {SmsManagement} from './smsManagement';
 import { FarmExpenses} from './farmExpenses';
 import {ErrorNotice, friendlyApiError, responseError, UserFacingError} from './apiErrors';
 import {ProductionIntelligence} from './productionIntelligence';
@@ -372,7 +373,7 @@ function App(){
  const [recorderKey,setRecorderKey]=useState(0);
  const [feedingCosts,setFeedingCosts]=useState<Obj|null>(null);
  const [evidenceRetry,setEvidenceRetry]=useState<Obj|null>(null);
- const [profileForm,setProfileForm]=useState<Obj>({phone_number:'',sms_daily_records_enabled:false,sms_loan_reminders_enabled:false});
+ const [profileForm,setProfileForm]=useState<Obj>({phone_number:'',sms_daily_records_enabled:false,sms_loan_reminders_enabled:false,sms_financial_alerts_enabled:false});
  const [portal,setPortal]=useState<'farmer'|'institution'|'admin'>('farmer');
  const [authMode,setAuthMode]=useState<'login'|'register'>('login');const [form,setForm]=useState<Obj>({});
  const [showLoginPassword,setShowLoginPassword]=useState(false);
@@ -518,12 +519,12 @@ function App(){
  const loadBase=useCallback(async()=>{if(!token)return;try{const u=await json('/auth/me');setUser(u);if(u.account_type==='pending_farmer'){setError('');return}
  if(u.is_platform_admin){
    setPage('admin');
-   setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false});
+   setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false,sms_financial_alerts_enabled:u.sms_financial_alerts_enabled??false});
    setPendingInstitutions(await json('/finance/admin/institutions'));
    setError('');
    return;
  }
- const [f,i,m]=await Promise.all([json('/farms'),json('/finance/institutions'),json('/finance/institutions/mine')]);setPage(old=>u.account_type==='institution'?'lender':old==='admin'?'overview':old);setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false});setFarms(f);setInstitutions(i);setMine(m);setPendingInstitutions([]);setFarmId(old=>{
+ const [f,i,m]=await Promise.all([json('/farms'),json('/finance/institutions'),json('/finance/institutions/mine')]);setPage(old=>u.account_type==='institution'?'lender':old==='admin'?'overview':old);setProfileForm({phone_number:u.phone_number??'',sms_daily_records_enabled:u.sms_daily_records_enabled??false,sms_loan_reminders_enabled:u.sms_loan_reminders_enabled??false,sms_financial_alerts_enabled:u.sms_financial_alerts_enabled??false});setFarms(f);setInstitutions(i);setMine(m);setPendingInstitutions([]);setFarmId(old=>{
   const saved=Number(sessionStorage.getItem('aquafarm-selected-farm:'+u.id));
   return f.some((x:Obj)=>x.id===old)?old:f.some((x:Obj)=>x.id===saved)?saved:f[0]?.id??null;
  });setInstitutionId(old=>m.some((x:Obj)=>x.id===old)?old:m[0]?.id??null);setError('')}catch(e){setError(String(e))}},[json,token]);
@@ -1010,8 +1011,8 @@ function App(){
    e.preventDefault();setBusy(true);setError('');setNotice('');
    const phone=String(profileForm.phone_number||'').trim();
    try{
-     const updated=await json('/auth/me',{phone_number:phone||null,sms_daily_records_enabled:Boolean(profileForm.sms_daily_records_enabled),sms_loan_reminders_enabled:Boolean(profileForm.sms_loan_reminders_enabled)},'PATCH');
-     setUser(updated);setProfileForm({phone_number:updated.phone_number??'',sms_daily_records_enabled:updated.sms_daily_records_enabled,sms_loan_reminders_enabled:updated.sms_loan_reminders_enabled});
+     const updated=await json('/auth/me',{phone_number:phone||null,sms_daily_records_enabled:Boolean(profileForm.sms_daily_records_enabled),sms_loan_reminders_enabled:Boolean(profileForm.sms_loan_reminders_enabled),sms_financial_alerts_enabled:Boolean(profileForm.sms_financial_alerts_enabled)},'PATCH');
+     setUser(updated);setProfileForm({phone_number:updated.phone_number??'',sms_daily_records_enabled:updated.sms_daily_records_enabled,sms_loan_reminders_enabled:updated.sms_loan_reminders_enabled,sms_financial_alerts_enabled:updated.sms_financial_alerts_enabled});
      setNotice('SMS contact and reminder preferences saved.');
    }catch(error){setError(String(error))}
    finally{setBusy(false)}
@@ -1707,9 +1708,10 @@ function App(){
   {phoneVerification}
   <h2 className="spaced">Daily SMS reminder settings</h2><p className="muted">A feeding record is expected for each active cycle every day. Missing records are flagged red after {dailyRecordStatus?.reminder_time||'08:00'} Africa/Accra time.</p>
   <form className="farmform" onSubmit={saveSmsContact}>
-   <label className="field"><span>Mobile number (international format, e.g. +233…)</span><input type="tel" autoComplete="tel" readOnly={Boolean(user.phone_verified_at)} pattern="\+[1-9]\d{7,14}" required={Boolean(profileForm.sms_daily_records_enabled||profileForm.sms_loan_reminders_enabled)} value={profileForm.phone_number??''} onChange={e=>setProfileForm({...profileForm,phone_number:e.target.value})}/></label>
+   <label className="field"><span>Mobile number (international format, e.g. +233…)</span><input type="tel" autoComplete="tel" readOnly={Boolean(user.phone_verified_at)} pattern="\+[1-9]\d{7,14}" required={Boolean(profileForm.sms_daily_records_enabled||profileForm.sms_loan_reminders_enabled||profileForm.sms_financial_alerts_enabled)} value={profileForm.phone_number??''} onChange={e=>setProfileForm({...profileForm,phone_number:e.target.value})}/></label>
    <label className="consent"><input type="checkbox" checked={Boolean(profileForm.sms_daily_records_enabled)} onChange={e=>setProfileForm({...profileForm,sms_daily_records_enabled:e.target.checked})}/> I agree to receive one SMS reminder each morning if an active cycle has no feeding record for the day.</label>
    <label className="consent"><input type="checkbox" checked={Boolean(profileForm.sms_loan_reminders_enabled)} onChange={e=>setProfileForm({...profileForm,sms_loan_reminders_enabled:e.target.checked})}/> I agree to receive SMS reminders 7 days before an instalment is due and daily while it is overdue.</label>
+   <label className="consent"><input type="checkbox" checked={Boolean(profileForm.sms_financial_alerts_enabled)} onChange={e=>setProfileForm({...profileForm,sms_financial_alerts_enabled:e.target.checked})}/> I agree to receive SMS updates when a loan decision, disbursement, repayment, deposit or settlement is recorded.</label>
    <button className="outline" disabled={busy}>Save reminder settings</button>
   </form>
   <p className="footnote">SMS delivery requires Hubtel credentials configured by the operator. You can disable reminders here at any time.</p>
@@ -2171,6 +2173,7 @@ function App(){
    <a className="outline" href="#admin/institutions">Financial institution management</a>
    {user.is_platform_owner&&<a className="outline" href="#admin/administrators">Administrators</a>}
    {user.is_platform_owner&&<a className="outline" href="#admin/administrators/pending">Pending administrator activation</a>}
+   {user.is_platform_owner&&<a className="outline" href="#admin/sms">SMS Management</a>}
    <a className="outline" href="#admin/security">Account security</a>
   </div></section>
   <FarmerApprovals key="dashboard-pending" load={json} revision={workspaceRefresh}
@@ -2179,6 +2182,8 @@ function App(){
     search={institutionReviewSearch} setSearch={setInstitutionReviewSearch} busy={busy} decide={(id,status,reason,queue)=>
       submit('/finance/admin/institutions/'+id+'/status',{status,reason},()=>{window.location.hash='admin/institutions/'+queue})}/>
  </>}
+ {(adminView==='sms'||adminView.startsWith('sms/'))&&user.is_platform_owner&&
+   <SmsManagement key={adminView} view={adminView.slice(4)} api={json}/>}
  {adminView==='security'&&<section className="panel">
    {phoneVerification}
    <AdministratorAuthenticator phone={user.phone_number??null} enrolled={Boolean(user.authenticator_enrolled)}
